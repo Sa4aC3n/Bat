@@ -1,0 +1,6 @@
+{
+  "name": "بطل اليوم",
+  "description": "تطبيق بطل اليوم للاحتفاء بالشخصيات الملهمة، والتحديات البطولية اليومية، وتكريم أبطال حياتك.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
