@@ -483,14 +483,14 @@ class HeroRepository(
     }
   }
 
-  suspend fun cancelChildTaskPendingApproval(occurrenceId: String) {
-    val now = System.currentTimeMillis()
-    heroDao.updateOccurrenceStatus(occurrenceId, TaskOccurrenceStatus.NOT_STARTED.code, completedAtMillis = null, updatedAtMillis = now)
+  suspend fun cancelChildTaskPendingApproval(occurrenceId: String, selectedChildId: String) {
+    val now = getCurrentTimeMillis()
+    heroDao.cancelPendingApprovalAtomically(occurrenceId, selectedChildId, now)
   }
 
-  suspend fun skipTaskToday(occurrenceId: String) {
-    val now = System.currentTimeMillis()
-    heroDao.updateOccurrenceStatus(occurrenceId, TaskOccurrenceStatus.SKIPPED.code, completedAtMillis = null, updatedAtMillis = now)
+  suspend fun skipTaskToday(occurrenceId: String, selectedChildId: String) {
+    val now = getCurrentTimeMillis()
+    heroDao.skipOccurrenceAtomically(occurrenceId, selectedChildId, now)
   }
 
   suspend fun approveTaskOccurrence(occurrenceId: String) {

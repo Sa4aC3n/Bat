@@ -2,10 +2,13 @@ package com.batal.elyoum.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.batal.elyoum.data.AgeGroup
 import com.batal.elyoum.data.ChildProfileEntity
 import com.batal.elyoum.data.DailyDeed
+import com.batal.elyoum.data.DefaultTimeProvider
 import com.batal.elyoum.data.Hero
 import com.batal.elyoum.data.HeroCategory
 import com.batal.elyoum.data.HeroRepository
@@ -14,6 +17,7 @@ import com.batal.elyoum.data.ParentSecurityEntity
 import com.batal.elyoum.data.ParentTaskEntity
 import com.batal.elyoum.data.RecurrenceType
 import com.batal.elyoum.data.TaskOccurrenceEntity
+import com.batal.elyoum.data.TimeProvider
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -378,8 +382,20 @@ class HeroViewModel(
     _latestPraiseMessage.value = null
   }
 
+  // Error message state
+  private val _errorMessage = MutableStateFlow<String?>(null)
+  val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+  fun dismissErrorMessage() {
+    _errorMessage.value = null
+  }
+
   fun submitTaskCompletion(occurrenceId: String) {
-    val childId = selectedChild.value?.id ?: return
+    val childId = selectedChild.value?.id
+    if (childId == null) {
+      _errorMessage.value = "يرجى اختيار ملف الطفل أولاً"
+      return
+    }
     viewModelScope.launch {
       try {
         val updated = repository.submitChildTaskCompletion(occurrenceId, childId)
@@ -387,7 +403,7 @@ class HeroViewModel(
           _latestPraiseMessage.value = repository.getRandomEffortPraise()
         }
       } catch (e: Exception) {
-        // Rejection handled
+        _errorMessage.value = e.message ?: "تعذر إرسال إنجاز المهمة، يرجى المحاولة مرة أخرى."
       }
     }
   }
@@ -397,14 +413,32 @@ class HeroViewModel(
   }
 
   fun cancelTaskPendingApproval(occurrenceId: String) {
+    val childId = selectedChild.value?.id
+    if (childId == null) {
+      _errorMessage.value = "يرجى اختيار ملف الطفل أولاً"
+      return
+    }
     viewModelScope.launch {
-      repository.cancelChildTaskPendingApproval(occurrenceId)
+      try {
+        repository.cancelChildTaskPendingApproval(occurrenceId, childId)
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "حدث خطأ أثناء إلغاء الانتظار"
+      }
     }
   }
 
   fun skipTaskToday(occurrenceId: String) {
+    val childId = selectedChild.value?.id
+    if (childId == null) {
+      _errorMessage.value = "يرجى اختيار ملف الطفل أولاً"
+      return
+    }
     viewModelScope.launch {
-      repository.skipTaskToday(occurrenceId)
+      try {
+        repository.skipTaskToday(occurrenceId, childId)
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "حدث خطأ أثناء تخطي المهمة"
+      }
     }
   }
 
@@ -540,5 +574,19 @@ class HeroViewModel(
       _isParentSessionUnlocked.value = true
     }
     return success
+  }
+
+  class Factory(
+    private val application: Application,
+    private val customRepository: HeroRepository? = null,
+    private val timeProvider: TimeProvider = DefaultTimeProvider()
+  ) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+      if (modelClass.isAssignableFrom(HeroViewModel::class.java)) {
+        return HeroViewModel(application, customRepository, timeProvider) as T
+      }
+      throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
   }
 }

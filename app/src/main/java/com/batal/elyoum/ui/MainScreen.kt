@@ -1,5 +1,6 @@
 package com.batal.elyoum.ui
 
+import android.app.Application
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.WorkspacePremium
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -82,13 +84,18 @@ enum class AppNavTab(val title: String, val testTag: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-  viewModel: HeroViewModel = viewModel()
+  viewModel: HeroViewModel = viewModel(
+    factory = HeroViewModel.Factory(
+      LocalContext.current.applicationContext as Application
+    )
+  )
 ) {
   var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
   var isInParentSection by rememberSaveable { mutableStateOf(false) }
   var showPinGateDialog by remember { mutableStateOf(false) }
 
   val isParentSessionUnlocked by viewModel.isParentSessionUnlocked.collectAsState()
+  val errorMessage by viewModel.errorMessage.collectAsState()
   val lifecycleOwner = LocalLifecycleOwner.current
 
   // Handle lifecycle: lock session on stop, refresh today's tasks on resume
@@ -260,6 +267,30 @@ fun MainScreen(
         onSuccess = {
           showPinGateDialog = false
           isInParentSection = true
+        }
+      )
+    }
+
+    if (errorMessage != null) {
+      AlertDialog(
+        onDismissRequest = { viewModel.dismissErrorMessage() },
+        title = {
+          Text(
+            text = "تنبيه",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+          )
+        },
+        text = {
+          Text(
+            text = errorMessage ?: "",
+            style = MaterialTheme.typography.bodyMedium
+          )
+        },
+        confirmButton = {
+          TextButton(onClick = { viewModel.dismissErrorMessage() }) {
+            Text("حسناً")
+          }
         }
       )
     }

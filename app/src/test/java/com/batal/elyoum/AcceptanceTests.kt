@@ -2,10 +2,12 @@ package com.batal.elyoum
 
 import android.app.Application
 import android.content.Context
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
+import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import com.batal.elyoum.data.AgeGroup
 import com.batal.elyoum.data.ChildProfileEntity
@@ -64,7 +66,22 @@ class AcceptanceTests {
   }
 
   // ==========================================
-  // 1. Acceptance Test: SecurityUtils & PIN Format
+  // 1. Acceptance Test: Real ActivityScenario Launch (Requirement 1)
+  // ==========================================
+
+  @Test
+  fun `test MainActivity launches successfully via real ActivityScenario`() {
+    val scenario = ActivityScenario.launch(MainActivity::class.java)
+    scenario.moveToState(Lifecycle.State.RESUMED)
+    scenario.onActivity { activity ->
+      assertNotNull(activity)
+      assertFalse(activity.isFinishing)
+    }
+    scenario.close()
+  }
+
+  // ==========================================
+  // 2. Acceptance Test: SecurityUtils & PIN Format
   // ==========================================
 
   @Test
@@ -96,7 +113,7 @@ class AcceptanceTests {
   }
 
   // ==========================================
-  // 2. Acceptance Test: PIN Rate Limiting & Lockout
+  // 3. Acceptance Test: PIN Rate Limiting & Lockout
   // ==========================================
 
   @Test
@@ -157,15 +174,13 @@ class AcceptanceTests {
   }
 
   // ==========================================
-  // 3. Acceptance Test: Real PIN Authentication & Session Protection
+  // 4. Acceptance Test: Real PIN Authentication & Session Protection
   // ==========================================
 
   @Test
   fun `test parent operations require real authenticated PIN session without bypass`() = runBlocking {
-    // Before PIN setup/verification, parent session is inactive
     assertFalse(repository.isParentSessionActive())
 
-    // Attempting parent operations without authentication throws SecurityException
     try {
       repository.createChildProfile("علي", AgeGroup.AGE_7_9, "avatar_star")
       fail("Must throw SecurityException when session is unauthenticated")
@@ -173,16 +188,13 @@ class AcceptanceTests {
       assertTrue(e.message!!.contains("جلسة مصادق عليها"))
     }
 
-    // Setting up the initial PIN authenticates the session
     val setupOk = repository.setupInitialPin("123456")
     assertTrue(setupOk)
     assertTrue(repository.isParentSessionActive())
 
-    // Now parent operations succeed
     val childId = repository.createChildProfile("علي", AgeGroup.AGE_7_9, "avatar_star")
     assertNotNull(childId)
 
-    // Locking the session de-authenticates it
     repository.lockParentSession()
     assertFalse(repository.isParentSessionActive())
 
@@ -200,14 +212,13 @@ class AcceptanceTests {
       assertTrue(e.message!!.contains("جلسة مصادق عليها"))
     }
 
-    // Authenticating via real verifyPin restores session
     val verifyRes = repository.verifyPin("123456")
     assertTrue(verifyRes is HeroRepository.PinCheckResult.Success)
     assertTrue(repository.isParentSessionActive())
   }
 
   // ==========================================
-  // 4. Acceptance Test: Child Data Isolation
+  // 5. Acceptance Test: Child Data Isolation
   // ==========================================
 
   @Test
@@ -255,7 +266,7 @@ class AcceptanceTests {
   }
 
   // ==========================================
-  // 5. Acceptance Test: submitChildTaskCompletion Atomic Verification & Rejection Cases
+  // 6. Acceptance Test: submitChildTaskCompletion Atomic Verification & Rejection Cases
   // ==========================================
 
   @Test
@@ -265,7 +276,6 @@ class AcceptanceTests {
     val child1Id = repository.createChildProfile("أحمد", AgeGroup.AGE_7_9, "avatar_star")
     val child2Id = repository.createChildProfile("سارة", AgeGroup.AGE_4_6, "avatar_falcon")
 
-    // Task requiring approval for child1
     val taskApprovalId = repository.createParentTask(
       title = "ترتيب المكتب",
       description = "ترتيب الأقلام والكتب",
@@ -276,7 +286,6 @@ class AcceptanceTests {
       startDate = "2026-09-21"
     )
 
-    // Task NOT requiring approval for child2
     val taskDirectId = repository.createParentTask(
       title = "شرب الماء",
       description = "شرب كأس ماء صحي",
@@ -341,7 +350,208 @@ class AcceptanceTests {
   }
 
   // ==========================================
-  // 6. Acceptance Test: Reactive Date Handling & Midnight Rollover
+  // 7. Acceptance Test: requiresApprovalSnapshot Immutability (Requirement 4)
+  // ==========================================
+
+  @Test
+  fun `test editing parent task does not alter requiresApprovalSnapshot of existing occurrence and completion obeys saved snapshot`() = runBlocking {
+    repository.setupInitialPin("123456")
+
+    val childId = repository.createChildProfile("فاطمة", AgeGroup.AGE_7_9, "avatar_star")
+
+    // Parent creates task with requiresApproval = true
+    val taskId = repository.createParentTask(
+      title = "قراءة سورة الفجر",
+      description = "قراءة بهدوء وتدبر",
+      requiresApproval = true,
+      recurrenceType = RecurrenceType.DAILY,
+      targetDaysOfWeek = emptyList(),
+      assignedChildIds = listOf(childId),
+      startDate = "2026-09-21"
+    )
+
+    // Sync occurrence for today
+    repository.syncOccurrencesForChildAndDate(childId, "2026-09-21")
+    val initialOcc = repository.getOccurrencesForChild(childId, "2026-09-21").first()[0]
+    assertTrue("Initial occurrence snapshot must require approval", initialOcc.requiresApprovalSnapshot)
+
+    // Parent edits the parent task later and turns OFF approval requirement for future tasks
+    repository.updateParentTask(
+      id = taskId,
+      title = "قراءة سورة الفجر",
+      description = "قراءة بهدوء وتدبر",
+      requiresApproval = false,
+      recurrenceType = RecurrenceType.DAILY,
+      targetDaysOfWeek = emptyList(),
+      assignedChildIds = listOf(childId)
+    )
+
+    // Verify parent task updated
+    val updatedTask = dao.getParentTaskById(taskId)
+    assertNotNull(updatedTask)
+    assertFalse("Parent task currently has requiresApproval = false", updatedTask!!.requiresApproval)
+
+    // Existing occurrence snapshot MUST remain true
+    val occBeforeSubmit = dao.getOccurrenceById(initialOcc.id)
+    assertNotNull(occBeforeSubmit)
+    assertTrue("Existing occurrence snapshot must not be mutated by parent task edit", occBeforeSubmit!!.requiresApprovalSnapshot)
+
+    // Child completes the task -> must transition to PENDING_APPROVAL according to its saved snapshot, NOT COMPLETED!
+    val submitted = repository.submitChildTaskCompletion(initialOcc.id, selectedChildId = childId)
+    assertEquals("Must transition to PENDING_APPROVAL based on saved snapshot", TaskOccurrenceStatus.PENDING_APPROVAL.code, submitted.status)
+  }
+
+  // ==========================================
+  // 8. Acceptance Test: Atomic Transitions for cancel and skip (Requirement 5)
+  // ==========================================
+
+  @Test
+  fun `test cancelChildTaskPendingApproval rejects invalid child and completed task`() = runBlocking {
+    repository.setupInitialPin("123456")
+
+    val child1Id = repository.createChildProfile("عمر", AgeGroup.AGE_7_9, "avatar_falcon")
+    val child2Id = repository.createChildProfile("زيد", AgeGroup.AGE_7_9, "avatar_shield")
+
+    val taskId = repository.createParentTask(
+      title = "إماطة الأذى",
+      description = "تنظيف المكان بلطف",
+      requiresApproval = true,
+      recurrenceType = RecurrenceType.DAILY,
+      targetDaysOfWeek = emptyList(),
+      assignedChildIds = listOf(child1Id),
+      startDate = "2026-09-21"
+    )
+
+    repository.syncOccurrencesForChildAndDate(child1Id, "2026-09-21")
+    val occ = repository.getOccurrencesForChild(child1Id, "2026-09-21").first()[0]
+
+    // 1. Cannot cancel when NOT_STARTED (must be in PENDING_APPROVAL)
+    try {
+      repository.cancelChildTaskPendingApproval(occ.id, selectedChildId = child1Id)
+      fail("Must reject cancel when task is NOT in PENDING_APPROVAL")
+    } catch (e: IllegalStateException) {
+      assertTrue(e.message!!.contains("ليست قيد الانتظار"))
+    }
+
+    // Submit task so it becomes PENDING_APPROVAL
+    repository.submitChildTaskCompletion(occ.id, selectedChildId = child1Id)
+
+    // 2. Reject cancel if another child attempts it (Ownership mismatch)
+    try {
+      repository.cancelChildTaskPendingApproval(occ.id, selectedChildId = child2Id)
+      fail("Must reject cancel when childId does not match")
+    } catch (e: IllegalStateException) {
+      assertTrue(e.message!!.contains("لا تنتمي للطفل"))
+    }
+
+    // 3. Successful cancel transitions back to NOT_STARTED
+    repository.cancelChildTaskPendingApproval(occ.id, selectedChildId = child1Id)
+    val cancelledOcc = dao.getOccurrenceById(occ.id)
+    assertEquals(TaskOccurrenceStatus.NOT_STARTED.code, cancelledOcc!!.status)
+
+    // Approve task to make it COMPLETED
+    repository.submitChildTaskCompletion(occ.id, selectedChildId = child1Id)
+    repository.approveTaskOccurrence(occ.id)
+
+    // 4. Reject cancel on COMPLETED task
+    try {
+      repository.cancelChildTaskPendingApproval(occ.id, selectedChildId = child1Id)
+      fail("Must reject cancel on already completed task")
+    } catch (e: IllegalStateException) {
+      assertTrue(e.message!!.contains("مكتملة بالفعل"))
+    }
+  }
+
+  @Test
+  fun `test skipTaskToday rejects invalid child and completed task`() = runBlocking {
+    repository.setupInitialPin("123456")
+
+    val child1Id = repository.createChildProfile("نور", AgeGroup.AGE_4_6, "avatar_star")
+    val child2Id = repository.createChildProfile("سما", AgeGroup.AGE_4_6, "avatar_flower")
+
+    val taskId = repository.createParentTask(
+      title = "ترتيب الألعاب",
+      description = "إعادة الألعاب لصندوقها",
+      requiresApproval = false,
+      recurrenceType = RecurrenceType.DAILY,
+      targetDaysOfWeek = emptyList(),
+      assignedChildIds = listOf(child1Id),
+      startDate = "2026-09-21"
+    )
+
+    repository.syncOccurrencesForChildAndDate(child1Id, "2026-09-21")
+    val occ = repository.getOccurrencesForChild(child1Id, "2026-09-21").first()[0]
+
+    // 1. Reject skip if another child attempts it
+    try {
+      repository.skipTaskToday(occ.id, selectedChildId = child2Id)
+      fail("Must reject skip when childId does not match")
+    } catch (e: IllegalStateException) {
+      assertTrue(e.message!!.contains("لا تنتمي للطفل"))
+    }
+
+    // 2. Successful skip transitions to SKIPPED
+    repository.skipTaskToday(occ.id, selectedChildId = child1Id)
+    val skippedOcc = dao.getOccurrenceById(occ.id)
+    assertEquals(TaskOccurrenceStatus.SKIPPED.code, skippedOcc!!.status)
+
+    // 3. Reject skip on COMPLETED task
+    val completedTaskId = repository.createParentTask(
+      title = "الوضوء للصلاة",
+      description = "الوضوء بنشاط",
+      requiresApproval = false,
+      recurrenceType = RecurrenceType.DAILY,
+      targetDaysOfWeek = emptyList(),
+      assignedChildIds = listOf(child1Id),
+      startDate = "2026-09-21"
+    )
+    val completedOcc = repository.submitChildTaskCompletion(completedTaskId, selectedChildId = child1Id)
+    assertEquals(TaskOccurrenceStatus.COMPLETED.code, completedOcc.status)
+
+    try {
+      repository.skipTaskToday(completedOcc.id, selectedChildId = child1Id)
+      fail("Must reject skip on completed task")
+    } catch (e: IllegalStateException) {
+      assertTrue(e.message!!.contains("مكتملة بالفعل"))
+    }
+  }
+
+  // ==========================================
+  // 9. Acceptance Test: Error Message Surfacing in ViewModel (Requirement 6)
+  // ==========================================
+
+  @Test
+  fun `test submitTaskCompletion failure exposes meaningful error message in ViewModel without swallowing`() = runBlocking {
+    repository.setupInitialPin("123456")
+
+    val childId = repository.createChildProfile("خالد", AgeGroup.AGE_7_9, "avatar_star")
+
+    val viewModel = HeroViewModel(
+      application = ApplicationProvider.getApplicationContext(),
+      customRepository = repository,
+      timeProvider = timeProvider
+    )
+
+    // With no child selected, submitTaskCompletion sets error message
+    assertNull(viewModel.errorMessage.value)
+    viewModel.submitTaskCompletion("invalid_id")
+    assertNotNull(viewModel.errorMessage.value)
+    assertTrue(viewModel.errorMessage.value!!.contains("اختيار ملف الطفل"))
+
+    viewModel.dismissErrorMessage()
+    assertNull(viewModel.errorMessage.value)
+
+    // Select child and attempt non-existent task ID
+    viewModel.selectChild(childId)
+    viewModel.submitTaskCompletion("non_existent_occurrence_123")
+
+    // Error message must be populated with meaningful text
+    assertNotNull(viewModel.errorMessage.value)
+    assertTrue(viewModel.errorMessage.value!!.contains("غير موجود"))
+  }
+
+  // ==========================================
+  // 10. Acceptance Test: Reactive Date Handling & Midnight Rollover
   // ==========================================
 
   @Test
@@ -350,7 +560,6 @@ class AcceptanceTests {
 
     val childId = repository.createChildProfile("بطل اليوم", AgeGroup.AGE_7_9, "avatar_lion")
 
-    // Create a daily task starting 2026-09-21
     val taskId = repository.createParentTask(
       title = "صلاة الفجر في وقتها",
       description = "الاستيقاظ بنشاط",
@@ -370,7 +579,6 @@ class AcceptanceTests {
     viewModel.selectChild(childId)
     viewModel.syncTodayTasksForChild(childId)
 
-    // On 2026-09-21: occurrence exists and child completes it
     val occDay1 = repository.getOccurrencesForChild(childId, "2026-09-21").first()
     assertEquals(1, occDay1.size)
     assertEquals(TaskOccurrenceStatus.NOT_STARTED.code, occDay1[0].status)
@@ -379,28 +587,22 @@ class AcceptanceTests {
     val occDay1Completed = repository.getOccurrencesForChild(childId, "2026-09-21").first()
     assertEquals(TaskOccurrenceStatus.COMPLETED.code, occDay1Completed[0].status)
 
-    // ADVANCE TO MIDNIGHT / NEXT DAY: 2026-09-22 without changing selectedChild
     timeProvider.setDate("2026-09-22")
-
-    // Calling refreshTodayDate (which occurs on app resume or midnight tick)
     viewModel.refreshTodayDate()
 
-    // Verify ViewModel date state updated
     assertEquals("2026-09-22", viewModel.currentDateString.value)
 
-    // Verify that the task occurrences for the NEW date are fresh (NOT_STARTED) and independent of previous day
     val occDay2 = repository.getOccurrencesForChild(childId, "2026-09-22").first()
     assertEquals(1, occDay2.size)
     assertEquals(TaskOccurrenceStatus.NOT_STARTED.code, occDay2[0].status)
     assertEquals("2026-09-22", occDay2[0].dateStr)
 
-    // Previous day occurrence remains safely COMPLETED
     val occDay1Check = repository.getOccurrencesForChild(childId, "2026-09-21").first()
     assertEquals(TaskOccurrenceStatus.COMPLETED.code, occDay1Check[0].status)
   }
 
   // ==========================================
-  // 7. Acceptance Test: Real v1 to v3 & v2 to v3 Database Migrations via Room
+  // 11. Acceptance Test: Real v1 to v3 Database Migration via Room (Requirement 2)
   // ==========================================
 
   @Test
@@ -408,7 +610,6 @@ class AcceptanceTests {
     val dbName = "real_v1_migration_test.db"
     context.deleteDatabase(dbName)
 
-    // 1. Create SQLite DB with actual v1 schema (honored_heroes, daily_deeds_progress, favorite_heroes)
     val helperConfig = SupportSQLiteOpenHelper.Configuration.builder(context)
       .name(dbName)
       .callback(object : SupportSQLiteOpenHelper.Callback(1) {
@@ -449,7 +650,6 @@ class AcceptanceTests {
     val openHelper = FrameworkSQLiteOpenHelperFactory().create(helperConfig)
     val dbSqlite = openHelper.writableDatabase
 
-    // Insert representative data into all 3 v1 tables
     dbSqlite.execSQL("""
       INSERT INTO `honored_heroes` (`name`, `relation`, `reason`, `badgeName`, `dateMillis`)
       VALUES ('أبي العزيز', 'أب ومربي', 'تعليمه لي الصدق والمثابرة', 'وسام الحكمة', 1726800000000)
@@ -467,7 +667,6 @@ class AcceptanceTests {
 
     dbSqlite.close()
 
-    // 2. Open migrated database directly with Room using official MIGRATION_1_2 and MIGRATION_2_3
     val migratedRoomDb = Room.databaseBuilder(context, HeroDatabase::class.java, dbName)
       .addMigrations(HeroDatabase.MIGRATION_1_2, HeroDatabase.MIGRATION_2_3)
       .allowMainThreadQueries()
@@ -475,7 +674,6 @@ class AcceptanceTests {
 
     val migratedDao = migratedRoomDb.heroDao()
 
-    // Verify all original v1 data is accessible through Room entities
     val honoredList = migratedDao.getAllHonoredHeroes().first()
     assertEquals(1, honoredList.size)
     assertEquals("أبي العزيز", honoredList[0].name)
@@ -485,11 +683,11 @@ class AcceptanceTests {
     assertEquals(1, favorites.size)
     assertEquals("al_khwarizmi", favorites[0].heroId)
 
+    // Solves Requirement 2 using valid DAO query
     val deedProgress = migratedDao.getDeedProgress("2026-09-20_smile")
     assertNotNull(deedProgress)
     assertTrue(deedProgress!!.isCompleted)
 
-    // Verify new v3 tables are ready and operational
     val children = migratedDao.getActiveChildren().first()
     assertTrue(children.isEmpty())
 
@@ -500,27 +698,90 @@ class AcceptanceTests {
     context.deleteDatabase(dbName)
   }
 
+  // ==========================================
+  // 12. Acceptance Test: Real v2 to v3 Database Migration with All Indexes (Requirement 3)
+  // ==========================================
+
   @Test
-  fun `test database migration from v2 to v3 upgrades security schema and preserves tasks`() = runBlocking {
-    val dbName = "v2_to_v3_migration_test.db"
+  fun `test database migration from real v2 schema with all indexes upgrades to v3 and preserves data in Room`() = runBlocking {
+    val dbName = "real_v2_to_v3_migration_test.db"
     context.deleteDatabase(dbName)
 
     val helperConfig = SupportSQLiteOpenHelper.Configuration.builder(context)
       .name(dbName)
       .callback(object : SupportSQLiteOpenHelper.Callback(2) {
         override fun onCreate(db: SupportSQLiteDatabase) {
-          // All v1 tables
+          // v1 tables
           db.execSQL("CREATE TABLE IF NOT EXISTS `honored_heroes` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `relation` TEXT NOT NULL, `reason` TEXT NOT NULL, `badgeName` TEXT NOT NULL, `dateMillis` INTEGER NOT NULL)")
           db.execSQL("CREATE TABLE IF NOT EXISTS `daily_deeds_progress` (`deedKey` TEXT NOT NULL PRIMARY KEY, `dateStr` TEXT NOT NULL, `deedId` TEXT NOT NULL, `isCompleted` INTEGER NOT NULL, `completedAtMillis` INTEGER NOT NULL)")
           db.execSQL("CREATE TABLE IF NOT EXISTS `favorite_heroes` (`heroId` TEXT NOT NULL PRIMARY KEY, `addedAtMillis` INTEGER NOT NULL)")
 
-          // v2 tables
-          db.execSQL("CREATE TABLE IF NOT EXISTS `child_profiles` (`id` TEXT NOT NULL PRIMARY KEY, `alias` TEXT NOT NULL, `ageGroup` TEXT NOT NULL, `avatarId` TEXT NOT NULL, `createdAtMillis` INTEGER NOT NULL, `isArchived` INTEGER NOT NULL DEFAULT 0)")
-          db.execSQL("CREATE TABLE IF NOT EXISTS `parent_tasks` (`id` TEXT NOT NULL PRIMARY KEY, `title` TEXT NOT NULL, `description` TEXT NOT NULL, `requiresApproval` INTEGER NOT NULL, `recurrenceType` TEXT NOT NULL, `targetDaysOfWeek` TEXT NOT NULL, `startDate` TEXT NOT NULL, `isArchived` INTEGER NOT NULL DEFAULT 0, `createdAtMillis` INTEGER NOT NULL)")
-          db.execSQL("CREATE TABLE IF NOT EXISTS `task_assignments` (`id` TEXT NOT NULL PRIMARY KEY, `taskId` TEXT NOT NULL, `childId` TEXT NOT NULL, `createdAtMillis` INTEGER NOT NULL)")
-          db.execSQL("CREATE TABLE IF NOT EXISTS `task_occurrences` (`id` TEXT NOT NULL PRIMARY KEY, `taskId` TEXT NOT NULL, `childId` TEXT NOT NULL, `dateStr` TEXT NOT NULL, `status` TEXT NOT NULL, `snapshotTitle` TEXT NOT NULL, `snapshotDescription` TEXT NOT NULL, `requiresApprovalSnapshot` INTEGER NOT NULL, `completedAtMillis` INTEGER, `parentFeedbackNote` TEXT, `updatedAtMillis` INTEGER NOT NULL)")
-          // v2 parent_security without algoVersion, iterations, algorithm
-          db.execSQL("CREATE TABLE IF NOT EXISTS `parent_security` (`id` INTEGER NOT NULL PRIMARY KEY, `pinSalt` TEXT NOT NULL, `pinHash` TEXT NOT NULL, `failedAttempts` INTEGER NOT NULL, `lockoutUntilMillis` INTEGER NOT NULL, `isConfigured` INTEGER NOT NULL, `updatedAtMillis` INTEGER NOT NULL)")
+          // v2 tables matching actual schema exactly including indexes
+          db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `child_profiles` (
+              `id` TEXT NOT NULL PRIMARY KEY,
+              `alias` TEXT NOT NULL,
+              `ageGroup` TEXT NOT NULL,
+              `avatarId` TEXT NOT NULL,
+              `createdAtMillis` INTEGER NOT NULL,
+              `isArchived` INTEGER NOT NULL
+            )
+          """.trimIndent())
+
+          db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `parent_tasks` (
+              `id` TEXT NOT NULL PRIMARY KEY,
+              `title` TEXT NOT NULL,
+              `description` TEXT NOT NULL,
+              `requiresApproval` INTEGER NOT NULL,
+              `recurrenceType` TEXT NOT NULL,
+              `targetDaysOfWeek` TEXT NOT NULL,
+              `startDate` TEXT NOT NULL,
+              `isArchived` INTEGER NOT NULL,
+              `createdAtMillis` INTEGER NOT NULL
+            )
+          """.trimIndent())
+
+          db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `task_assignments` (
+              `id` TEXT NOT NULL PRIMARY KEY,
+              `taskId` TEXT NOT NULL,
+              `childId` TEXT NOT NULL,
+              `createdAtMillis` INTEGER NOT NULL
+            )
+          """.trimIndent())
+          db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_task_assignments_taskId_childId` ON `task_assignments` (`taskId`, `childId`)")
+          db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_assignments_childId` ON `task_assignments` (`childId`)")
+
+          db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `task_occurrences` (
+              `id` TEXT NOT NULL PRIMARY KEY,
+              `taskId` TEXT NOT NULL,
+              `childId` TEXT NOT NULL,
+              `dateStr` TEXT NOT NULL,
+              `status` TEXT NOT NULL,
+              `snapshotTitle` TEXT NOT NULL,
+              `snapshotDescription` TEXT NOT NULL,
+              `requiresApprovalSnapshot` INTEGER NOT NULL,
+              `completedAtMillis` INTEGER,
+              `parentFeedbackNote` TEXT,
+              `updatedAtMillis` INTEGER NOT NULL
+            )
+          """.trimIndent())
+          db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_task_occurrences_taskId_childId_dateStr` ON `task_occurrences` (`taskId`, `childId`, `dateStr`)")
+          db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_occurrences_childId_dateStr` ON `task_occurrences` (`childId`, `dateStr`)")
+
+          db.execSQL("""
+            CREATE TABLE IF NOT EXISTS `parent_security` (
+              `id` INTEGER NOT NULL PRIMARY KEY,
+              `pinSalt` TEXT NOT NULL,
+              `pinHash` TEXT NOT NULL,
+              `failedAttempts` INTEGER NOT NULL,
+              `lockoutUntilMillis` INTEGER NOT NULL,
+              `isConfigured` INTEGER NOT NULL,
+              `updatedAtMillis` INTEGER NOT NULL
+            )
+          """.trimIndent())
         }
 
         override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
@@ -530,14 +791,12 @@ class AcceptanceTests {
     val openHelper = FrameworkSQLiteOpenHelperFactory().create(helperConfig)
     val dbSqlite = openHelper.writableDatabase
 
-    // Insert representative v2 security & child record
-    dbSqlite.execSQL("""
-      INSERT INTO `parent_security` VALUES (1, 'salt_v2', 'hash_v2', 0, 0, 1, 1726800000000)
-    """.trimIndent())
-
-    dbSqlite.execSQL("""
-      INSERT INTO `child_profiles` VALUES ('child_1', 'يوسف', 'AGE_7_9', 'avatar_falcon', 1726800000000, 0)
-    """.trimIndent())
+    // Insert representative data across all v2 tables
+    dbSqlite.execSQL("INSERT INTO `parent_security` VALUES (1, 'salt_v2_exact', 'hash_v2_exact', 0, 0, 1, 1726800000000)")
+    dbSqlite.execSQL("INSERT INTO `child_profiles` VALUES ('child_10', 'حمزة', 'AGE_7_9', 'avatar_lion', 1726800000000, 0)")
+    dbSqlite.execSQL("INSERT INTO `parent_tasks` VALUES ('task_10', 'بر الوالدين', 'مساعدة أمي', 1, 'DAILY', '', '2026-09-20', 0, 1726800000000)")
+    dbSqlite.execSQL("INSERT INTO `task_assignments` VALUES ('assign_10', 'task_10', 'child_10', 1726800000000)")
+    dbSqlite.execSQL("INSERT INTO `task_occurrences` VALUES ('occ_10', 'task_10', 'child_10', '2026-09-20', 'COMPLETED', 'بر الوالدين', 'مساعدة أمي', 1, 1726800100000, NULL, 1726800100000)")
 
     dbSqlite.close()
 
@@ -548,24 +807,38 @@ class AcceptanceTests {
       .build()
 
     val migratedDao = migratedRoomDb.heroDao()
+
+    // Verify parent security upgraded to v3 columns with defaults
     val sec = migratedDao.getParentSecurity()
     assertNotNull(sec)
-    assertEquals("salt_v2", sec!!.pinSalt)
-    assertEquals("hash_v2", sec.pinHash)
-    assertEquals(1, sec.algoVersion) // defaulted by migration
+    assertEquals("salt_v2_exact", sec!!.pinSalt)
+    assertEquals("hash_v2_exact", sec.pinHash)
+    assertEquals(1, sec.algoVersion)
     assertEquals(10000, sec.iterations)
     assertEquals("PBKDF2WithHmacSHA256", sec.algorithm)
 
+    // Verify child profiles intact
     val children = migratedDao.getActiveChildren().first()
     assertEquals(1, children.size)
-    assertEquals("يوسف", children[0].alias)
+    assertEquals("حمزة", children[0].alias)
+
+    // Verify parent tasks intact
+    val tasks = migratedDao.getAllTasks().first()
+    assertEquals(1, tasks.size)
+    assertEquals("بر الوالدين", tasks[0].title)
+
+    // Verify occurrences intact
+    val occurrences = migratedDao.getOccurrencesForChildAndDate("child_10", "2026-09-20").first()
+    assertEquals(1, occurrences.size)
+    assertEquals("occ_10", occurrences[0].id)
+    assertEquals(TaskOccurrenceStatus.COMPLETED.code, occurrences[0].status)
 
     migratedRoomDb.close()
     context.deleteDatabase(dbName)
   }
 
   // ==========================================
-  // 8. Acceptance Test: Legacy PIN Verification & Transparent Migration
+  // 13. Acceptance Test: Legacy PIN Verification & Transparent Migration
   // ==========================================
 
   @Test
@@ -574,7 +847,6 @@ class AcceptanceTests {
     val salt = SecurityUtils.generateSalt()
     val hash = SecurityUtils.hashPin(pin, salt, algorithm = SecurityUtils.DEFAULT_ALGORITHM, iterations = 10_000)
 
-    // Simulate record migrated from v2 (algoVersion = 1)
     val legacyEntity = ParentSecurityEntity(
       id = 1,
       pinSalt = salt,
@@ -589,18 +861,15 @@ class AcceptanceTests {
     )
     dao.insertOrUpdateParentSecurity(legacyEntity)
 
-    // Verify PIN succeeds
     val checkRes = repository.verifyPin(pin)
     assertTrue("Legacy PBKDF2 PIN must verify successfully", checkRes is HeroRepository.PinCheckResult.Success)
 
-    // Check that record was transparently upgraded to CURRENT_ALGO_VERSION
     val upgraded = dao.getParentSecurity()
     assertNotNull(upgraded)
     assertEquals(SecurityUtils.CURRENT_ALGO_VERSION, upgraded!!.algoVersion)
     assertEquals(SecurityUtils.DEFAULT_ALGORITHM, upgraded.algorithm)
     assertEquals(10_000, upgraded.iterations)
 
-    // Subsequent logins work cleanly with upgraded record
     val secondLogin = repository.verifyPin(pin)
     assertTrue(secondLogin is HeroRepository.PinCheckResult.Success)
   }
@@ -609,7 +878,6 @@ class AcceptanceTests {
   fun `test legacy SHA256_MULTI_ROUND pin from v2 is verified and upgraded to PBKDF2`() = runBlocking {
     val pin = "654321"
     val salt = SecurityUtils.generateSalt()
-    // Generate legacy SHA256_MULTI_ROUND hash
     val legacyShaHash = SecurityUtils.hashPin(
       pin = pin,
       saltBase64 = salt,
@@ -617,7 +885,6 @@ class AcceptanceTests {
       iterations = 10_000
     )
 
-    // Simulate v2 record migrated to v3 where algorithm was defaulted to PBKDF2WithHmacSHA256, but hash was SHA256_MULTI_ROUND
     val legacyEntity = ParentSecurityEntity(
       id = 1,
       pinSalt = salt,
@@ -627,36 +894,31 @@ class AcceptanceTests {
       isConfigured = true,
       algoVersion = SecurityUtils.LEGACY_ALGO_VERSION_1,
       iterations = 10_000,
-      algorithm = SecurityUtils.DEFAULT_ALGORITHM, // Default from migration
+      algorithm = SecurityUtils.DEFAULT_ALGORITHM,
       updatedAtMillis = 1726800000000L
     )
     dao.insertOrUpdateParentSecurity(legacyEntity)
 
-    // Wrong PIN must still fail
     val wrongRes = repository.verifyPin("000000")
     assertTrue(wrongRes is HeroRepository.PinCheckResult.IncorrectPin)
 
-    // Correct legacy PIN must verify through legacy fallback and transparently upgrade
     val checkRes = repository.verifyPin(pin)
     assertTrue("Legacy SHA256_MULTI_ROUND PIN must verify successfully", checkRes is HeroRepository.PinCheckResult.Success)
 
-    // Check that record was transparently upgraded to CURRENT_ALGO_VERSION with standard PBKDF2
     val upgraded = dao.getParentSecurity()
     assertNotNull(upgraded)
     assertEquals(SecurityUtils.CURRENT_ALGO_VERSION, upgraded!!.algoVersion)
     assertEquals(SecurityUtils.DEFAULT_ALGORITHM, upgraded.algorithm)
     assertEquals(10_000, upgraded.iterations)
 
-    // The upgraded hash must now verify with PBKDF2!
     assertTrue(SecurityUtils.verifyPin(pin, upgraded.pinSalt, upgraded.pinHash, SecurityUtils.DEFAULT_ALGORITHM, 10_000))
 
-    // Subsequent logins work directly with upgraded PBKDF2
     val secondLogin = repository.verifyPin(pin)
     assertTrue(secondLogin is HeroRepository.PinCheckResult.Success)
   }
 
   // ==========================================
-  // 9. Acceptance Test: Educational Praise and Tone
+  // 14. Acceptance Test: Educational Praise and Tone
   // ==========================================
 
   @Test

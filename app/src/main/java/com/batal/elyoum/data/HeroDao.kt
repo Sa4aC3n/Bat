@@ -29,6 +29,9 @@ interface HeroDao {
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insertDeedProgress(progress: DailyDeedProgressEntity)
 
+  @Query("SELECT * FROM daily_deeds_progress WHERE deedKey = :deedKey LIMIT 1")
+  suspend fun getDeedProgress(deedKey: String): DailyDeedProgressEntity?
+
   @Query("DELETE FROM daily_deeds_progress WHERE deedKey = :deedKey")
   suspend fun deleteDeedProgress(deedKey: String)
 
@@ -168,8 +171,8 @@ interface HeroDao {
       throw IllegalStateException("المهمة قيد الانتظار لموافقة ولي الأمر بالفعل")
     }
 
-    val parentTask = getParentTaskById(occ.taskId)
-    val requiresApproval = parentTask?.requiresApproval ?: occ.requiresApprovalSnapshot
+    // Rely exclusively on requiresApprovalSnapshot stored in the occurrence record
+    val requiresApproval = occ.requiresApprovalSnapshot
 
     val newStatus = if (requiresApproval) {
       TaskOccurrenceStatus.PENDING_APPROVAL.code
@@ -179,8 +182,61 @@ interface HeroDao {
 
     val updated = occ.copy(
       status = newStatus,
-      requiresApprovalSnapshot = requiresApproval,
       completedAtMillis = if (newStatus == TaskOccurrenceStatus.COMPLETED.code) now else occ.completedAtMillis,
+      updatedAtMillis = now
+    )
+    updateOccurrence(updated)
+    return updated
+  }
+
+  @Transaction
+  suspend fun cancelPendingApprovalAtomically(
+    occurrenceId: String,
+    childId: String,
+    now: Long
+  ): TaskOccurrenceEntity {
+    val occ = getOccurrenceById(occurrenceId)
+      ?: throw IllegalArgumentException("سجل المهمة غير موجود")
+    if (occ.childId != childId) {
+      throw IllegalStateException("المهمة لا تنتمي للطفل المحدد")
+    }
+    if (occ.status == TaskOccurrenceStatus.COMPLETED.code) {
+      throw IllegalStateException("لا يمكن تعديل مهمة مكتملة بالفعل")
+    }
+    if (occ.status != TaskOccurrenceStatus.PENDING_APPROVAL.code) {
+      throw IllegalStateException("المهمة ليست قيد الانتظار لموافقة ولي الأمر")
+    }
+
+    val updated = occ.copy(
+      status = TaskOccurrenceStatus.NOT_STARTED.code,
+      completedAtMillis = null,
+      updatedAtMillis = now
+    )
+    updateOccurrence(updated)
+    return updated
+  }
+
+  @Transaction
+  suspend fun skipOccurrenceAtomically(
+    occurrenceId: String,
+    childId: String,
+    now: Long
+  ): TaskOccurrenceEntity {
+    val occ = getOccurrenceById(occurrenceId)
+      ?: throw IllegalArgumentException("سجل المهمة غير موجود")
+    if (occ.childId != childId) {
+      throw IllegalStateException("المهمة لا تنتمي للطفل المحدد")
+    }
+    if (occ.status == TaskOccurrenceStatus.COMPLETED.code) {
+      throw IllegalStateException("لا يمكن تخطي مهمة مكتملة بالفعل")
+    }
+    if (occ.status == TaskOccurrenceStatus.SKIPPED.code) {
+      return occ
+    }
+
+    val updated = occ.copy(
+      status = TaskOccurrenceStatus.SKIPPED.code,
+      completedAtMillis = null,
       updatedAtMillis = now
     )
     updateOccurrence(updated)
