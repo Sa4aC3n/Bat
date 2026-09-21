@@ -91,11 +91,13 @@ fun MainScreen(
   val isParentSessionUnlocked by viewModel.isParentSessionUnlocked.collectAsState()
   val lifecycleOwner = LocalLifecycleOwner.current
 
-  // Lock parent session whenever the app goes to background / stops
+  // Handle lifecycle: lock session on stop, refresh today's tasks on resume
   DisposableEffect(lifecycleOwner) {
     val observer = LifecycleEventObserver { _, event ->
       if (event == Lifecycle.Event.ON_STOP) {
         viewModel.lockParentSession()
+      } else if (event == Lifecycle.Event.ON_RESUME) {
+        viewModel.refreshTodayDate()
       }
     }
     lifecycleOwner.lifecycle.addObserver(observer)

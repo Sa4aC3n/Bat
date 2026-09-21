@@ -48,8 +48,12 @@ data class QuizResult(
   val description: String
 )
 
-class HeroViewModel(application: Application) : AndroidViewModel(application) {
-  private val repository = HeroRepository(application)
+class HeroViewModel(
+  application: Application,
+  customRepository: HeroRepository? = null,
+  private val timeProvider: TimeProvider = DefaultTimeProvider()
+) : AndroidViewModel(application) {
+  val repository: HeroRepository = customRepository ?: HeroRepository(application, timeProvider = timeProvider)
 
   val todayHero: Hero = repository.getTodayHero()
 
@@ -253,11 +257,38 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
     initialValue = null
   )
 
+  private val _currentDateString = MutableStateFlow(timeProvider.todayDateString())
+  val currentDateString: StateFlow<String> = _currentDateString.asStateFlow()
+
+  fun refreshTodayDate() {
+    val newDate = timeProvider.todayDateString()
+    _currentDateString.value = newDate
+    selectedChild.value?.let { child ->
+      syncTodayTasksForChild(child.id)
+    }
+  }
+
   init {
     viewModelScope.launch {
-      selectedChild.collect { child ->
+      combine(selectedChild, _currentDateString) { child, date ->
+        Pair(child, date)
+      }.collect { (child, date) ->
         if (child != null) {
-          repository.syncOccurrencesForChildAndDate(child.id, repository.getTodayDateString())
+          repository.syncOccurrencesForChildAndDate(child.id, date)
+        }
+      }
+    }
+
+    // Auto-update date periodically (e.g. at midnight)
+    viewModelScope.launch {
+      while (true) {
+        kotlinx.coroutines.delay(30_000)
+        val latest = timeProvider.todayDateString()
+        if (latest != _currentDateString.value) {
+          _currentDateString.value = latest
+          selectedChild.value?.let { child ->
+            repository.syncOccurrencesForChildAndDate(child.id, latest)
+          }
         }
       }
     }
@@ -315,11 +346,16 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
   )
 
   @OptIn(ExperimentalCoroutinesApi::class)
-  val todayChildOccurrences: StateFlow<List<TaskOccurrenceEntity>> = selectedChild.flatMapLatest { child ->
+  val todayChildOccurrences: StateFlow<List<TaskOccurrenceEntity>> = combine(
+    selectedChild,
+    _currentDateString
+  ) { child, dateStr ->
+    Pair(child, dateStr)
+  }.flatMapLatest { (child, dateStr) ->
     if (child == null) {
       flowOf(emptyList())
     } else {
-      repository.getOccurrencesForChild(child.id, repository.getTodayDateString())
+      repository.getOccurrencesForChild(child.id, dateStr)
     }
   }.stateIn(
     scope = viewModelScope,
@@ -330,7 +366,7 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
   fun syncTodayTasksForChild(childId: String? = selectedChild.value?.id) {
     if (childId == null) return
     viewModelScope.launch {
-      repository.syncOccurrencesForChildAndDate(childId, repository.getTodayDateString())
+      repository.syncOccurrencesForChildAndDate(childId, _currentDateString.value)
     }
   }
 
@@ -342,13 +378,22 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
     _latestPraiseMessage.value = null
   }
 
-  fun submitTaskCompletion(occurrence: TaskOccurrenceEntity) {
+  fun submitTaskCompletion(occurrenceId: String) {
+    val childId = selectedChild.value?.id ?: return
     viewModelScope.launch {
-      repository.submitChildTaskCompletion(occurrence.id, occurrence.requiresApprovalSnapshot)
-      if (!occurrence.requiresApprovalSnapshot) {
-        _latestPraiseMessage.value = repository.getRandomEffortPraise()
+      try {
+        val updated = repository.submitChildTaskCompletion(occurrenceId, childId)
+        if (updated.status == TaskOccurrenceStatus.COMPLETED.code) {
+          _latestPraiseMessage.value = repository.getRandomEffortPraise()
+        }
+      } catch (e: Exception) {
+        // Rejection handled
       }
     }
+  }
+
+  fun submitTaskCompletion(occurrence: TaskOccurrenceEntity) {
+    submitTaskCompletion(occurrence.id)
   }
 
   fun cancelTaskPendingApproval(occurrenceId: String) {

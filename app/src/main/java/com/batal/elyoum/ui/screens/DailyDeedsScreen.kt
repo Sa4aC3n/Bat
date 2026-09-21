@@ -287,7 +287,7 @@ fun DailyDeedsScreen(
         items(todayOccurrences, key = { it.id }) { occ ->
           ParentTaskOccurrenceCard(
             occurrence = occ,
-            onSubmit = { viewModel.submitTaskCompletion(occ) },
+            onSubmit = { viewModel.submitTaskCompletion(occ.id) },
             onCancel = { viewModel.cancelTaskPendingApproval(occ.id) },
             onSkip = { viewModel.skipTaskToday(occ.id) }
           )

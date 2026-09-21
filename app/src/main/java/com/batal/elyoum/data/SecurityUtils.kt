@@ -10,7 +10,9 @@ object SecurityUtils {
   const val DEFAULT_ALGORITHM = "PBKDF2WithHmacSHA256"
   const val DEFAULT_ITERATIONS = 10_000
   const val DEFAULT_KEY_LENGTH = 256
-  const val DEFAULT_ALGO_VERSION = 1
+  const val LEGACY_ALGO_VERSION_1 = 1
+  const val CURRENT_ALGO_VERSION = 2
+  const val DEFAULT_ALGO_VERSION = CURRENT_ALGO_VERSION
   const val LEGACY_ALGORITHM_SHA256_MULTI = "SHA256_MULTI_ROUND"
 
   private const val SALT_BYTES = 16

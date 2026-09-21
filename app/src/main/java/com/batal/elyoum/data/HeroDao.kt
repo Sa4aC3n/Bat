@@ -129,6 +129,12 @@ interface HeroDao {
   @Query("SELECT * FROM task_occurrences WHERE status = 'PENDING_APPROVAL' ORDER BY updatedAtMillis DESC")
   fun getPendingApprovalOccurrences(): Flow<List<TaskOccurrenceEntity>>
 
+  @Query("SELECT * FROM task_occurrences WHERE id = :occurrenceId LIMIT 1")
+  suspend fun getOccurrenceById(occurrenceId: String): TaskOccurrenceEntity?
+
+  @Query("SELECT * FROM parent_tasks WHERE id = :taskId LIMIT 1")
+  suspend fun getParentTaskById(taskId: String): ParentTaskEntity?
+
   @Query("SELECT * FROM task_occurrences WHERE taskId = :taskId AND childId = :childId AND dateStr = :dateStr LIMIT 1")
   suspend fun getOccurrence(taskId: String, childId: String, dateStr: String): TaskOccurrenceEntity?
 
@@ -143,6 +149,55 @@ interface HeroDao {
 
   @Query("UPDATE task_occurrences SET status = :status, parentFeedbackNote = :note, updatedAtMillis = :updatedAtMillis WHERE id = :occurrenceId")
   suspend fun reviewOccurrence(occurrenceId: String, status: String, note: String?, updatedAtMillis: Long)
+
+  @Transaction
+  suspend fun submitOccurrenceAtomically(
+    occurrenceId: String,
+    childId: String,
+    now: Long
+  ): TaskOccurrenceEntity {
+    val occ = getOccurrenceById(occurrenceId)
+      ?: throw IllegalArgumentException("سجل المهمة غير موجود")
+    if (occ.childId != childId) {
+      throw IllegalStateException("المهمة لا تنتمي للطفل المحدد")
+    }
+    if (occ.status == TaskOccurrenceStatus.COMPLETED.code) {
+      throw IllegalStateException("لا يمكن تعديل مهمة مكتملة بالفعل")
+    }
+    if (occ.status == TaskOccurrenceStatus.PENDING_APPROVAL.code) {
+      throw IllegalStateException("المهمة قيد الانتظار لموافقة ولي الأمر بالفعل")
+    }
+
+    val parentTask = getParentTaskById(occ.taskId)
+    val requiresApproval = parentTask?.requiresApproval ?: occ.requiresApprovalSnapshot
+
+    val newStatus = if (requiresApproval) {
+      TaskOccurrenceStatus.PENDING_APPROVAL.code
+    } else {
+      TaskOccurrenceStatus.COMPLETED.code
+    }
+
+    val updated = occ.copy(
+      status = newStatus,
+      requiresApprovalSnapshot = requiresApproval,
+      completedAtMillis = if (newStatus == TaskOccurrenceStatus.COMPLETED.code) now else occ.completedAtMillis,
+      updatedAtMillis = now
+    )
+    updateOccurrence(updated)
+    return updated
+  }
+
+  @Transaction
+  suspend fun submitTaskByTaskIdAtomically(
+    taskId: String,
+    childId: String,
+    dateStr: String,
+    now: Long
+  ): TaskOccurrenceEntity {
+    val occ = getOccurrence(taskId, childId, dateStr)
+      ?: throw IllegalArgumentException("لا يوجد سجل لهذه المهمة لليوم المحدد")
+    return submitOccurrenceAtomically(occ.id, childId, now)
+  }
 
   // --- Parent Security ---
   @Query("SELECT * FROM parent_security WHERE id = 1 LIMIT 1")

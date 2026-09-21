@@ -9,7 +9,8 @@ import java.util.Locale
 
 class HeroRepository(
   context: Context,
-  dao: HeroDao? = null
+  dao: HeroDao? = null,
+  private val timeProvider: TimeProvider = DefaultTimeProvider()
 ) {
   private val heroDao: HeroDao = dao ?: HeroDatabase.getDatabase(context).heroDao()
 
@@ -20,10 +21,6 @@ class HeroRepository(
 
   fun lockParentSession() {
     isParentSessionAuthenticated = false
-  }
-
-  fun setParentSessionAuthenticatedForTesting(authenticated: Boolean) {
-    isParentSessionAuthenticated = authenticated
   }
 
   private fun ensureParentSessionAuthenticated() {
@@ -200,10 +197,9 @@ class HeroRepository(
     )
   }
 
-  fun getTodayDateString(): String {
-    val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH)
-    return sdf.format(Date())
-  }
+  fun getTodayDateString(): String = timeProvider.todayDateString()
+
+  fun getCurrentTimeMillis(): Long = timeProvider.currentTimeMillis()
 
   fun getTodayHero(): Hero {
     val dayOfYear = Calendar.getInstance().get(Calendar.DAY_OF_YEAR)
@@ -475,14 +471,16 @@ class HeroRepository(
     }
   }
 
-  suspend fun submitChildTaskCompletion(occurrenceId: String, requiresApprovalSnapshot: Boolean) {
-    val newStatus = if (requiresApprovalSnapshot) {
-      TaskOccurrenceStatus.PENDING_APPROVAL.code
+  suspend fun submitChildTaskCompletion(identifier: String, selectedChildId: String): TaskOccurrenceEntity {
+    require(selectedChildId.isNotBlank()) { "سياق الطفل المحدد مطلوب" }
+    require(identifier.isNotBlank()) { "معرف المهمة مطلوب" }
+    val now = getCurrentTimeMillis()
+    val occById = heroDao.getOccurrenceById(identifier)
+    return if (occById != null) {
+      heroDao.submitOccurrenceAtomically(occById.id, selectedChildId, now)
     } else {
-      TaskOccurrenceStatus.COMPLETED.code
+      heroDao.submitTaskByTaskIdAtomically(identifier, selectedChildId, getTodayDateString(), now)
     }
-    val now = System.currentTimeMillis()
-    heroDao.updateOccurrenceStatus(occurrenceId, newStatus, completedAtMillis = now, updatedAtMillis = now)
   }
 
   suspend fun cancelChildTaskPendingApproval(occurrenceId: String) {
@@ -554,10 +552,10 @@ class HeroRepository(
       failedAttempts = 0,
       lockoutUntilMillis = 0L,
       isConfigured = true,
-      algoVersion = SecurityUtils.DEFAULT_ALGO_VERSION,
+      algoVersion = SecurityUtils.CURRENT_ALGO_VERSION,
       iterations = SecurityUtils.DEFAULT_ITERATIONS,
       algorithm = SecurityUtils.DEFAULT_ALGORITHM,
-      updatedAtMillis = System.currentTimeMillis()
+      updatedAtMillis = getCurrentTimeMillis()
     )
     heroDao.insertOrUpdateParentSecurity(entity)
     isParentSessionAuthenticated = true
@@ -568,40 +566,95 @@ class HeroRepository(
     val sec = heroDao.getParentSecurity() ?: return PinCheckResult.NotConfigured
     if (!sec.isConfigured) return PinCheckResult.NotConfigured
 
-    val now = System.currentTimeMillis()
+    val now = getCurrentTimeMillis()
     if (sec.lockoutUntilMillis > now) {
       val remainingSeconds = (sec.lockoutUntilMillis - now + 999) / 1000
       return PinCheckResult.LockedOut(remainingSeconds)
     }
 
-    val isValid = SecurityUtils.verifyPin(
+    if (!SecurityUtils.isValidPinFormat(enteredPin)) {
+      return recordFailedAttempt(sec, now)
+    }
+
+    // 1. Try recorded algorithm
+    var isValid = SecurityUtils.verifyPin(
       enteredPin = enteredPin,
       saltBase64 = sec.pinSalt,
       expectedHash = sec.pinHash,
       algorithm = sec.algorithm,
       iterations = sec.iterations
     )
-    if (isValid) {
-      // Reset failed attempts on success
-      heroDao.insertOrUpdateParentSecurity(
-        sec.copy(failedAttempts = 0, lockoutUntilMillis = 0L, updatedAtMillis = now)
+
+    var needsUpgrade = false
+
+    // 2. If primary failed and record is legacy (algoVersion <= 1), try alternate legacy algorithm
+    if (!isValid && sec.algoVersion <= SecurityUtils.LEGACY_ALGO_VERSION_1) {
+      val altAlgorithm = if (sec.algorithm == SecurityUtils.DEFAULT_ALGORITHM) {
+        SecurityUtils.LEGACY_ALGORITHM_SHA256_MULTI
+      } else {
+        SecurityUtils.DEFAULT_ALGORITHM
+      }
+      val legacyValid = SecurityUtils.verifyPin(
+        enteredPin = enteredPin,
+        saltBase64 = sec.pinSalt,
+        expectedHash = sec.pinHash,
+        algorithm = altAlgorithm,
+        iterations = sec.iterations
       )
+      if (legacyValid) {
+        isValid = true
+        needsUpgrade = true
+      }
+    } else if (isValid && (sec.algoVersion < SecurityUtils.CURRENT_ALGO_VERSION || sec.algorithm != SecurityUtils.DEFAULT_ALGORITHM)) {
+      needsUpgrade = true
+    }
+
+    if (isValid) {
+      if (needsUpgrade) {
+        val newSalt = SecurityUtils.generateSalt()
+        val newHash = SecurityUtils.hashPin(
+          pin = enteredPin,
+          saltBase64 = newSalt,
+          algorithm = SecurityUtils.DEFAULT_ALGORITHM,
+          iterations = SecurityUtils.DEFAULT_ITERATIONS
+        )
+        heroDao.insertOrUpdateParentSecurity(
+          sec.copy(
+            pinSalt = newSalt,
+            pinHash = newHash,
+            failedAttempts = 0,
+            lockoutUntilMillis = 0L,
+            algoVersion = SecurityUtils.CURRENT_ALGO_VERSION,
+            iterations = SecurityUtils.DEFAULT_ITERATIONS,
+            algorithm = SecurityUtils.DEFAULT_ALGORITHM,
+            updatedAtMillis = now
+          )
+        )
+      } else {
+        heroDao.insertOrUpdateParentSecurity(
+          sec.copy(failedAttempts = 0, lockoutUntilMillis = 0L, updatedAtMillis = now)
+        )
+      }
       isParentSessionAuthenticated = true
       return PinCheckResult.Success
     } else {
-      val newFailedAttempts = sec.failedAttempts + 1
-      val lockoutDuration = SecurityUtils.getLockoutDurationMillis(newFailedAttempts)
-      val newLockoutUntil = if (lockoutDuration > 0) now + lockoutDuration else 0L
-      heroDao.insertOrUpdateParentSecurity(
-        sec.copy(
-          failedAttempts = newFailedAttempts,
-          lockoutUntilMillis = newLockoutUntil,
-          updatedAtMillis = now
-        )
-      )
-      val lockoutSec = if (lockoutDuration > 0) lockoutDuration / 1000 else 0L
-      return PinCheckResult.IncorrectPin(newFailedAttempts, lockoutSec)
+      return recordFailedAttempt(sec, now)
     }
+  }
+
+  private suspend fun recordFailedAttempt(sec: ParentSecurityEntity, now: Long): PinCheckResult {
+    val newFailedAttempts = sec.failedAttempts + 1
+    val lockoutDuration = SecurityUtils.getLockoutDurationMillis(newFailedAttempts)
+    val newLockoutUntil = if (lockoutDuration > 0) now + lockoutDuration else 0L
+    heroDao.insertOrUpdateParentSecurity(
+      sec.copy(
+        failedAttempts = newFailedAttempts,
+        lockoutUntilMillis = newLockoutUntil,
+        updatedAtMillis = now
+      )
+    )
+    val lockoutSec = if (lockoutDuration > 0) lockoutDuration / 1000 else 0L
+    return PinCheckResult.IncorrectPin(newFailedAttempts, lockoutSec)
   }
 
   suspend fun changePin(currentPin: String, newPin: String): Boolean {
@@ -609,6 +662,7 @@ class HeroRepository(
     val verify = verifyPin(currentPin)
     if (verify !is PinCheckResult.Success) return false
     if (!SecurityUtils.isValidPinFormat(newPin)) return false
+    val now = getCurrentTimeMillis()
     val salt = SecurityUtils.generateSalt()
     val hash = SecurityUtils.hashPin(newPin, salt)
     val entity = ParentSecurityEntity(
@@ -618,10 +672,10 @@ class HeroRepository(
       failedAttempts = 0,
       lockoutUntilMillis = 0L,
       isConfigured = true,
-      algoVersion = SecurityUtils.DEFAULT_ALGO_VERSION,
+      algoVersion = SecurityUtils.CURRENT_ALGO_VERSION,
       iterations = SecurityUtils.DEFAULT_ITERATIONS,
       algorithm = SecurityUtils.DEFAULT_ALGORITHM,
-      updatedAtMillis = System.currentTimeMillis()
+      updatedAtMillis = now
     )
     heroDao.insertOrUpdateParentSecurity(entity)
     isParentSessionAuthenticated = true
@@ -633,6 +687,7 @@ class HeroRepository(
       throw SecurityException("إعادة ضبط الرمز تتطلب نجاح مصادقة أمان الجهاز")
     }
     if (!SecurityUtils.isValidPinFormat(newPin)) return false
+    val now = getCurrentTimeMillis()
     val salt = SecurityUtils.generateSalt()
     val hash = SecurityUtils.hashPin(newPin, salt)
     val entity = ParentSecurityEntity(
@@ -642,10 +697,10 @@ class HeroRepository(
       failedAttempts = 0,
       lockoutUntilMillis = 0L,
       isConfigured = true,
-      algoVersion = SecurityUtils.DEFAULT_ALGO_VERSION,
+      algoVersion = SecurityUtils.CURRENT_ALGO_VERSION,
       iterations = SecurityUtils.DEFAULT_ITERATIONS,
       algorithm = SecurityUtils.DEFAULT_ALGORITHM,
-      updatedAtMillis = System.currentTimeMillis()
+      updatedAtMillis = now
     )
     heroDao.insertOrUpdateParentSecurity(entity)
     isParentSessionAuthenticated = true
