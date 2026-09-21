@@ -2,6 +2,9 @@ package com.batal.elyoum.data
 
 import android.content.Context
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -327,7 +330,9 @@ class HeroRepository(
     recurrenceType: RecurrenceType,
     targetDaysOfWeek: List<Int>,
     assignedChildIds: List<String>,
-    startDate: String = getTodayDateString()
+    startDate: String = getTodayDateString(),
+    ageGroup: String = "ALL",
+    category: String = "GENERAL"
   ): String {
     ensureParentSessionAuthenticated()
     val cleanTitle = title.trim()
@@ -342,7 +347,9 @@ class HeroRepository(
       targetDaysOfWeek = targetDaysOfWeek.joinToString(","),
       startDate = startDate,
       isArchived = false,
-      createdAtMillis = System.currentTimeMillis()
+      createdAtMillis = System.currentTimeMillis(),
+      ageGroup = ageGroup,
+      category = category
     )
 
     val assignments = assignedChildIds.distinct().map { childId ->
@@ -365,7 +372,9 @@ class HeroRepository(
     recurrenceType: RecurrenceType,
     targetDaysOfWeek: List<Int>,
     assignedChildIds: List<String>,
-    startDate: String = getTodayDateString()
+    startDate: String = getTodayDateString(),
+    ageGroup: String = "ALL",
+    category: String = "GENERAL"
   ) {
     ensureParentSessionAuthenticated()
     val cleanTitle = title.trim()
@@ -379,7 +388,9 @@ class HeroRepository(
       targetDaysOfWeek = targetDaysOfWeek.joinToString(","),
       startDate = startDate,
       isArchived = false,
-      createdAtMillis = System.currentTimeMillis()
+      createdAtMillis = System.currentTimeMillis(),
+      ageGroup = ageGroup,
+      category = category
     )
 
     val assignments = assignedChildIds.distinct().map { childId ->
@@ -493,6 +504,13 @@ class HeroRepository(
     heroDao.skipOccurrenceAtomically(occurrenceId, selectedChildId, now)
   }
 
+  suspend fun postponeTaskToday(occurrenceId: String, selectedChildId: String, targetDateStr: String): TaskOccurrenceEntity {
+    require(selectedChildId.isNotBlank()) { "سياق الطفل المحدد مطلوب" }
+    require(targetDateStr.isNotBlank()) { "تاريخ التأجيل مطلوب" }
+    val now = getCurrentTimeMillis()
+    return heroDao.postponeOccurrenceAtomically(occurrenceId, selectedChildId, targetDateStr, now)
+  }
+
   suspend fun approveTaskOccurrence(occurrenceId: String) {
     ensureParentSessionAuthenticated()
     val now = System.currentTimeMillis()
@@ -509,15 +527,11 @@ class HeroRepository(
   // --- Educational Effort Praise ---
   // ==========================================
 
-  private val effortPraiseMessages = listOf(
-    "رتّبت حاجتك بنفسك، شكرًا على اهتمامك ومسؤوليتك!",
-    "محاولة رائعة واهتمام جميل، شكرًا لمجهودك الطيب اليوم!",
-    "خطوة ممتازة نحو الاعتماد على نفسك، فخورون بجهدك!",
-    "شكرًا لمبادرتك الطيبة، كل خطوة إيجابية تصنع فرقاً جميلاً!",
-    "أنجزت خطوتك اليوم بهدوء وإتقان، بارك الله في سعيك!"
-  )
+  fun getEffortPraiseForOccurrence(occurrence: TaskOccurrenceEntity): String {
+    return EffortPraiseProvider.getPraiseForTask(occurrence.snapshotTitle, occurrence.snapshotDescription)
+  }
 
-  fun getRandomEffortPraise(): String = effortPraiseMessages.random()
+  fun getRandomEffortPraise(): String = EffortPraiseProvider.getPraiseForTask(null, null)
 
   // ==========================================
   // --- Parent Security & PIN Gate ---
@@ -705,6 +719,463 @@ class HeroRepository(
     heroDao.insertOrUpdateParentSecurity(entity)
     isParentSessionAuthenticated = true
     return true
+  }
+
+  // ==========================================
+  // --- Family Rewards & Moments ---
+  // ==========================================
+
+  fun getRewardsForChild(childId: String): Flow<List<FamilyRewardEntity>> = heroDao.getRewardsForChildFlow(childId)
+
+  fun getActiveRewardsForChild(childId: String): Flow<List<FamilyRewardEntity>> = heroDao.getActiveRewardsForChildFlow(childId)
+
+  suspend fun getRewardById(rewardId: String): FamilyRewardEntity? = heroDao.getRewardById(rewardId)
+
+  suspend fun getRewardHistory(rewardId: String): List<FamilyRewardHistoryEntity> = heroDao.getHistoryForReward(rewardId)
+
+  suspend fun createFamilyReward(
+    title: String,
+    description: String,
+    rewardType: RewardType,
+    childId: String,
+    grantMode: RewardGrantMode,
+    goalCriteria: String? = null,
+    targetDate: String? = null,
+    initialStatus: RewardStatus = RewardStatus.PLANNED
+  ): String {
+    ensureParentSessionAuthenticated()
+    require(title.isNotBlank()) { "عنوان المكافأة مطلوب" }
+    require(childId.isNotBlank()) { "الطفل المستفيد مطلوب" }
+    val now = getCurrentTimeMillis()
+    val rewardId = java.util.UUID.randomUUID().toString()
+    val reward = FamilyRewardEntity(
+      id = rewardId,
+      title = title.trim(),
+      description = description.trim(),
+      rewardType = rewardType.code,
+      childId = childId,
+      grantMode = grantMode.code,
+      goalCriteria = goalCriteria?.trim(),
+      targetDate = targetDate?.trim(),
+      status = initialStatus.code,
+      cancellationReason = null,
+      requestedAtMillis = null,
+      fulfilledAtMillis = null,
+      createdAtMillis = now,
+      updatedAtMillis = now
+    )
+    heroDao.insertReward(reward)
+    heroDao.insertRewardHistory(
+      FamilyRewardHistoryEntity(
+        rewardId = rewardId,
+        fromStatus = "NONE",
+        toStatus = initialStatus.code,
+        note = "تم إنشاء لحظة/مكافأة أسرية جديدة",
+        timestampMillis = now
+      )
+    )
+    return rewardId
+  }
+
+  suspend fun updateFamilyReward(
+    rewardId: String,
+    title: String,
+    description: String,
+    rewardType: RewardType,
+    childId: String,
+    grantMode: RewardGrantMode,
+    goalCriteria: String? = null,
+    targetDate: String? = null
+  ) {
+    ensureParentSessionAuthenticated()
+    val existing = heroDao.getRewardById(rewardId) ?: throw IllegalArgumentException("المكافأة غير موجودة")
+    val now = getCurrentTimeMillis()
+    val updated = existing.copy(
+      title = title.trim(),
+      description = description.trim(),
+      rewardType = rewardType.code,
+      childId = childId,
+      grantMode = grantMode.code,
+      goalCriteria = goalCriteria?.trim(),
+      targetDate = targetDate?.trim(),
+      updatedAtMillis = now
+    )
+    heroDao.updateReward(updated)
+  }
+
+  suspend fun makeRewardAvailable(rewardId: String): FamilyRewardEntity {
+    ensureParentSessionAuthenticated()
+    val now = getCurrentTimeMillis()
+    return heroDao.makeRewardAvailableAtomically(rewardId, now)
+  }
+
+  suspend fun requestRewardByChild(rewardId: String, childId: String): FamilyRewardEntity {
+    require(childId.isNotBlank()) { "معرف الطفل مطلوب" }
+    val now = getCurrentTimeMillis()
+    return heroDao.requestRewardAtomically(rewardId, childId, now)
+  }
+
+  suspend fun fulfillReward(rewardId: String, note: String? = null): FamilyRewardEntity {
+    ensureParentSessionAuthenticated()
+    val now = getCurrentTimeMillis()
+    return heroDao.fulfillRewardAtomically(rewardId, note, now)
+  }
+
+  suspend fun cancelReward(rewardId: String, gentleReason: String): FamilyRewardEntity {
+    ensureParentSessionAuthenticated()
+    require(gentleReason.isNotBlank()) { "سبب الإلغاء اللطيف مطلوب لحفظ السجل بوضوح" }
+    val now = getCurrentTimeMillis()
+    return heroDao.cancelRewardAtomically(rewardId, gentleReason, now)
+  }
+
+  // ==========================================
+  // --- Parent Weekly Summary ---
+  // ==========================================
+
+  data class WeeklySummaryData(
+    val childId: String,
+    val childAlias: String,
+    val startDate: String,
+    val endDate: String,
+    val completedCount: Int,
+    val pendingCount: Int,
+    val postponedCount: Int,
+    val skippedCount: Int,
+    val incompleteCount: Int,
+    val totalScheduled: Int,
+    val fulfilledRewardsCount: Int,
+    val fulfilledRewards: List<FamilyRewardEntity>,
+    val categoriesParticipated: List<String>,
+    val gentleSupportSuggestion: String,
+    val disclaimer: String = "هذه اقتراحات داعمة وتوجيهية لتعزيز الترابط الأسري، وليست تقييماً نفسياً أو تشخيصاً متخصصاً."
+  )
+
+  suspend fun calculateWeeklySummary(childId: String, startDate: String, endDate: String): WeeklySummaryData {
+    ensureParentSessionAuthenticated()
+    val child = heroDao.getChildById(childId)
+      ?: throw IllegalArgumentException("ملف الطفل غير موجود")
+
+    val occurrences = heroDao.getOccurrencesForChildBetweenDatesSync(childId, startDate, endDate)
+
+    val completed = occurrences.count { it.status == TaskOccurrenceStatus.COMPLETED.code }
+    val pending = occurrences.count { it.status == TaskOccurrenceStatus.PENDING_APPROVAL.code }
+    val postponed = occurrences.count { it.status == TaskOccurrenceStatus.POSTPONED.code }
+    val skipped = occurrences.count { it.status == TaskOccurrenceStatus.SKIPPED.code }
+    val incomplete = occurrences.count { it.status == TaskOccurrenceStatus.NOT_STARTED.code }
+    val total = occurrences.size
+
+    val startMillis = try {
+      SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(startDate)?.time ?: 0L
+    } catch (_: Exception) { 0L }
+    val endMillis = try {
+      (SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(endDate)?.time ?: 0L) + 86400000L
+    } catch (_: Exception) { Long.MAX_VALUE }
+
+    val fulfilledRewards = heroDao.getFulfilledRewardsForChildBetween(childId, startMillis, endMillis)
+
+    // Discover categories participated based on completed tasks
+    val completedTaskIds = occurrences.filter { it.status == TaskOccurrenceStatus.COMPLETED.code }.map { it.taskId }.distinct()
+    val categories = mutableListOf<String>()
+    for (tId in completedTaskIds) {
+      val t = heroDao.getTaskById(tId)
+      if (t != null && t.category.isNotBlank() && !categories.contains(t.category)) {
+        categories.add(t.category)
+      }
+    }
+    if (categories.isEmpty() && completed > 0) {
+      categories.add("المبادرة والتعاون")
+    }
+
+    // Generate gentle rule-based suggestions
+    val suggestion = when {
+      total == 0 -> "لم يتم تسجيل مهام في هذا الأسبوع. يمكنكم اختيار مهمة أو اثنتين معاً لبدء أسبوع لطيف وهادئ."
+      postponed + skipped > completed -> "لوحظ تأجيل أو تخطي بعض المهام؛ نقترح تقليل عدد المهام الأسبوع القادم واختيار مهام بسيطة ومحببة للطفل لتعزيز ثقته بنفسه."
+      completed >= (total * 0.7) -> "أسبوع رائع ومثمر بخطوات طيبة وملموسة! شكرًا لدعمكم المستمر وتشجيعكم لجهود البطل الصغير."
+      else -> "أسبوع طيب مليء بالمحاولات والتعلم؛ استمروا في تشجيع كل خطوة إيجابية والاحتفال بالسعي الطيب."
+    }
+
+    return WeeklySummaryData(
+      childId = childId,
+      childAlias = child.alias,
+      startDate = startDate,
+      endDate = endDate,
+      completedCount = completed,
+      pendingCount = pending,
+      postponedCount = postponed,
+      skippedCount = skipped,
+      incompleteCount = incomplete,
+      totalScheduled = total,
+      fulfilledRewardsCount = fulfilledRewards.size,
+      fulfilledRewards = fulfilledRewards,
+      categoriesParticipated = categories,
+      gentleSupportSuggestion = suggestion
+    )
+  }
+
+  // ==========================================
+  // --- Editorial Content Review Catalog ---
+  // ==========================================
+
+  suspend fun ensureContentReviewCatalogPopulated() {
+    if (heroDao.countContentReviewRecords() == 0) {
+      heroDao.insertContentReviewRecords(ContentReviewCatalog.DEFAULT_RECORDS)
+    }
+  }
+
+  fun getAllContentReviewRecords(): Flow<List<ContentReviewRecordEntity>> = heroDao.getAllContentReviewRecordsFlow()
+
+  fun getContentReviewRecord(contentId: String): Flow<ContentReviewRecordEntity?> = heroDao.getContentReviewRecordFlow(contentId)
+
+  suspend fun getContentReviewRecordSync(contentId: String): ContentReviewRecordEntity? = heroDao.getContentReviewRecord(contentId)
+
+  // ==========================================
+  // --- App Settings & Customization ---
+  // ==========================================
+
+  fun getAppSettings(): Flow<AppSettingsEntity> = heroDao.getAppSettingsFlow().map { it ?: AppSettingsEntity() }
+
+  suspend fun updateThemeMode(themeMode: String) {
+    val current = heroDao.getAppSettingsSync() ?: AppSettingsEntity()
+    heroDao.insertOrUpdateAppSettings(current.copy(themeMode = themeMode, updatedAtMillis = getCurrentTimeMillis()))
+  }
+
+  suspend fun updateNotificationSettings(enabled: Boolean, startHour: Int, endHour: Int, hideOnLock: Boolean) {
+    val current = heroDao.getAppSettingsSync() ?: AppSettingsEntity()
+    heroDao.insertOrUpdateAppSettings(
+      current.copy(
+        notificationsEnabled = enabled,
+        notificationQuietHourStart = startHour,
+        notificationQuietHourEnd = endHour,
+        hideTaskDetailsOnLockScreen = hideOnLock,
+        updatedAtMillis = getCurrentTimeMillis()
+      )
+    )
+  }
+
+  suspend fun updateReduceMotion(reduce: Boolean) {
+    val current = heroDao.getAppSettingsSync() ?: AppSettingsEntity()
+    heroDao.insertOrUpdateAppSettings(current.copy(reduceMotionCelebration = reduce, updatedAtMillis = getCurrentTimeMillis()))
+  }
+
+  // ==========================================
+  // --- Data Backup, Restore & Cascade Deletion ---
+  // ==========================================
+
+  data class BackupPreviewInfo(
+    val childCount: Int,
+    val taskCount: Int,
+    val occurrenceCount: Int,
+    val rewardCount: Int,
+    val schemaVersion: Int,
+    val createdAt: String
+  )
+
+  suspend fun exportEncryptedBackupJson(backupPassword: String): String {
+    ensureParentSessionAuthenticated()
+    require(backupPassword.length >= 4) { "يجب أن لا تقل كلمة مرور النسخة الاحتياطية عن 4 خانات" }
+
+    val children = heroDao.getAllChildrenSync()
+    val tasks = heroDao.getAllTasksSync()
+    val occurrences = heroDao.getAllOccurrencesSync()
+    val rewards = heroDao.getAllRewardsSync()
+
+    val root = JSONObject().apply {
+      put("version", 4)
+      put("exportedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date()))
+
+      val childrenArray = JSONArray()
+      for (c in children) {
+        childrenArray.put(JSONObject().apply {
+          put("id", c.id)
+          put("alias", c.alias)
+          put("ageGroup", c.ageGroup)
+          put("avatarId", c.avatarId)
+          put("createdAtMillis", c.createdAtMillis)
+          put("isArchived", c.isArchived)
+        })
+      }
+      put("children", childrenArray)
+
+      val tasksArray = JSONArray()
+      for (t in tasks) {
+        tasksArray.put(JSONObject().apply {
+          put("id", t.id)
+          put("title", t.title)
+          put("description", t.description)
+          put("requiresApproval", t.requiresApproval)
+          put("recurrenceType", t.recurrenceType)
+          put("targetDaysOfWeek", t.targetDaysOfWeek)
+          put("startDate", t.startDate)
+          put("isArchived", t.isArchived)
+          put("createdAtMillis", t.createdAtMillis)
+          put("ageGroup", t.ageGroup)
+          put("category", t.category)
+        })
+      }
+      put("tasks", tasksArray)
+
+      val occurrencesArray = JSONArray()
+      for (o in occurrences) {
+        occurrencesArray.put(JSONObject().apply {
+          put("id", o.id)
+          put("taskId", o.taskId)
+          put("childId", o.childId)
+          put("dateStr", o.dateStr)
+          put("status", o.status)
+          put("snapshotTitle", o.snapshotTitle)
+          put("snapshotDescription", o.snapshotDescription)
+          put("requiresApprovalSnapshot", o.requiresApprovalSnapshot)
+          put("completedAtMillis", o.completedAtMillis ?: JSONObject.NULL)
+          put("parentFeedbackNote", o.parentFeedbackNote ?: JSONObject.NULL)
+          put("updatedAtMillis", o.updatedAtMillis)
+          put("postponedToDate", o.postponedToDate ?: JSONObject.NULL)
+          put("originalOccurrenceId", o.originalOccurrenceId ?: JSONObject.NULL)
+        })
+      }
+      put("occurrences", occurrencesArray)
+
+      val rewardsArray = JSONArray()
+      for (r in rewards) {
+        rewardsArray.put(JSONObject().apply {
+          put("id", r.id)
+          put("title", r.title)
+          put("description", r.description)
+          put("rewardType", r.rewardType)
+          put("childId", r.childId)
+          put("grantMode", r.grantMode)
+          put("goalCriteria", r.goalCriteria ?: JSONObject.NULL)
+          put("targetDate", r.targetDate ?: JSONObject.NULL)
+          put("status", r.status)
+          put("cancellationReason", r.cancellationReason ?: JSONObject.NULL)
+          put("requestedAtMillis", r.requestedAtMillis ?: JSONObject.NULL)
+          put("fulfilledAtMillis", r.fulfilledAtMillis ?: JSONObject.NULL)
+          put("createdAtMillis", r.createdAtMillis)
+          put("updatedAtMillis", r.updatedAtMillis)
+        })
+      }
+      put("rewards", rewardsArray)
+    }
+
+    return BackupEncryptionUtils.encryptBackup(root.toString(), backupPassword)
+  }
+
+  suspend fun previewEncryptedBackup(encryptedEnvelopeJson: String, backupPassword: String): BackupPreviewInfo {
+    ensureParentSessionAuthenticated()
+    val plainJson = BackupEncryptionUtils.decryptBackup(encryptedEnvelopeJson, backupPassword)
+    val root = JSONObject(plainJson)
+    val version = root.optInt("version", 4)
+    val exportedAt = root.optString("exportedAt", "")
+    val childCount = root.optJSONArray("children")?.length() ?: 0
+    val taskCount = root.optJSONArray("tasks")?.length() ?: 0
+    val occCount = root.optJSONArray("occurrences")?.length() ?: 0
+    val rewardCount = root.optJSONArray("rewards")?.length() ?: 0
+
+    return BackupPreviewInfo(
+      childCount = childCount,
+      taskCount = taskCount,
+      occurrenceCount = occCount,
+      rewardCount = rewardCount,
+      schemaVersion = version,
+      createdAt = exportedAt
+    )
+  }
+
+  suspend fun restoreFromEncryptedBackup(encryptedEnvelopeJson: String, backupPassword: String): Boolean {
+    ensureParentSessionAuthenticated()
+    val plainJson = BackupEncryptionUtils.decryptBackup(encryptedEnvelopeJson, backupPassword)
+    val root = JSONObject(plainJson)
+
+    val childrenArray = root.optJSONArray("children") ?: JSONArray()
+    val tasksArray = root.optJSONArray("tasks") ?: JSONArray()
+    val occurrencesArray = root.optJSONArray("occurrences") ?: JSONArray()
+    val rewardsArray = root.optJSONArray("rewards") ?: JSONArray()
+
+    // Atomically clear and restore without touching security PIN credentials
+    heroDao.deleteAllFamilyDataAtomically()
+
+    for (i in 0 until childrenArray.length()) {
+      val cObj = childrenArray.getJSONObject(i)
+      val child = ChildProfileEntity(
+        id = cObj.getString("id"),
+        alias = cObj.getString("alias"),
+        ageGroup = cObj.getString("ageGroup"),
+        avatarId = cObj.getString("avatarId"),
+        createdAtMillis = cObj.getLong("createdAtMillis"),
+        isArchived = cObj.optBoolean("isArchived", false)
+      )
+      heroDao.insertChild(child)
+    }
+
+    for (i in 0 until tasksArray.length()) {
+      val tObj = tasksArray.getJSONObject(i)
+      val task = ParentTaskEntity(
+        id = tObj.getString("id"),
+        title = tObj.getString("title"),
+        description = tObj.getString("description"),
+        requiresApproval = tObj.getBoolean("requiresApproval"),
+        recurrenceType = tObj.getString("recurrenceType"),
+        targetDaysOfWeek = tObj.optString("targetDaysOfWeek", ""),
+        startDate = tObj.getString("startDate"),
+        isArchived = tObj.optBoolean("isArchived", false),
+        createdAtMillis = tObj.getLong("createdAtMillis"),
+        ageGroup = tObj.optString("ageGroup", "ALL"),
+        category = tObj.optString("category", "GENERAL")
+      )
+      heroDao.insertTask(task)
+    }
+
+    for (i in 0 until occurrencesArray.length()) {
+      val oObj = occurrencesArray.getJSONObject(i)
+      val occ = TaskOccurrenceEntity(
+        id = oObj.getString("id"),
+        taskId = oObj.getString("taskId"),
+        childId = oObj.getString("childId"),
+        dateStr = oObj.getString("dateStr"),
+        status = oObj.getString("status"),
+        snapshotTitle = oObj.getString("snapshotTitle"),
+        snapshotDescription = oObj.getString("snapshotDescription"),
+        requiresApprovalSnapshot = oObj.getBoolean("requiresApprovalSnapshot"),
+        completedAtMillis = if (oObj.isNull("completedAtMillis")) null else oObj.getLong("completedAtMillis"),
+        parentFeedbackNote = if (oObj.isNull("parentFeedbackNote")) null else oObj.getString("parentFeedbackNote"),
+        updatedAtMillis = oObj.getLong("updatedAtMillis"),
+        postponedToDate = if (oObj.isNull("postponedToDate")) null else oObj.getString("postponedToDate"),
+        originalOccurrenceId = if (oObj.isNull("originalOccurrenceId")) null else oObj.getString("originalOccurrenceId")
+      )
+      heroDao.insertOccurrenceIfNotExists(occ)
+    }
+
+    for (i in 0 until rewardsArray.length()) {
+      val rObj = rewardsArray.getJSONObject(i)
+      val reward = FamilyRewardEntity(
+        id = rObj.getString("id"),
+        title = rObj.getString("title"),
+        description = rObj.getString("description"),
+        rewardType = rObj.getString("rewardType"),
+        childId = rObj.getString("childId"),
+        grantMode = rObj.getString("grantMode"),
+        goalCriteria = if (rObj.isNull("goalCriteria")) null else rObj.getString("goalCriteria"),
+        targetDate = if (rObj.isNull("targetDate")) null else rObj.getString("targetDate"),
+        status = rObj.getString("status"),
+        cancellationReason = if (rObj.isNull("cancellationReason")) null else rObj.getString("cancellationReason"),
+        requestedAtMillis = if (rObj.isNull("requestedAtMillis")) null else rObj.getLong("requestedAtMillis"),
+        fulfilledAtMillis = if (rObj.isNull("fulfilledAtMillis")) null else rObj.getLong("fulfilledAtMillis"),
+        createdAtMillis = rObj.getLong("createdAtMillis"),
+        updatedAtMillis = rObj.getLong("updatedAtMillis")
+      )
+      heroDao.insertReward(reward)
+    }
+
+    return true
+  }
+
+  suspend fun deleteChildProfilePermanently(childId: String) {
+    ensureParentSessionAuthenticated()
+    heroDao.deleteChildPermanentlyAtomically(childId)
+  }
+
+  suspend fun deleteAllFamilyData() {
+    ensureParentSessionAuthenticated()
+    heroDao.deleteAllFamilyDataAtomically()
   }
 }
 

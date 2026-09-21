@@ -13,6 +13,8 @@ import com.batal.elyoum.data.AgeGroup
 import com.batal.elyoum.data.ChildProfileEntity
 import com.batal.elyoum.data.ControllableTimeProvider
 import com.batal.elyoum.data.DailyDeedProgressEntity
+import com.batal.elyoum.data.ContentReviewRecordEntity
+import com.batal.elyoum.data.FamilyRewardEntity
 import com.batal.elyoum.data.FavoriteHeroEntity
 import com.batal.elyoum.data.HeroDao
 import com.batal.elyoum.data.HeroDatabase
@@ -21,6 +23,9 @@ import com.batal.elyoum.data.HonoredHeroEntity
 import com.batal.elyoum.data.ParentSecurityEntity
 import com.batal.elyoum.data.ParentTaskEntity
 import com.batal.elyoum.data.RecurrenceType
+import com.batal.elyoum.data.RewardGrantMode
+import com.batal.elyoum.data.RewardStatus
+import com.batal.elyoum.data.RewardType
 import com.batal.elyoum.data.SecurityUtils
 import com.batal.elyoum.data.TaskOccurrenceEntity
 import com.batal.elyoum.data.TaskOccurrenceStatus
@@ -930,6 +935,163 @@ class AcceptanceTests {
       assertFalse(msg.contains("خسرت"))
       assertFalse(msg.contains("عقوبة"))
       assertFalse(msg.contains("إنذار"))
+    }
+  }
+
+  // ==========================================
+  // 15. Acceptance Test: Family Reward Lifecycle
+  // ==========================================
+
+  @Test
+  fun `test family reward lifecycle from planned to available to child request to fulfilled`() = runBlocking {
+    repository.setupInitialPin("123456")
+    repository.verifyPin("123456")
+
+    val child = repository.createChildProfile("يوسف", AgeGroup.MIDDLE)
+
+    // 1. Create planned reward
+    val reward = repository.createFamilyReward(
+      title = "جلسة قراءة قصص الأبطال",
+      description = "جلسة ممتعة مع الوالدين لمدة نصف ساعة",
+      rewardType = RewardType.SHARED_ACTIVITY,
+      childId = child.id,
+      grantMode = RewardGrantMode.UPON_CHILD_REQUEST,
+      initialStatus = RewardStatus.PLANNED
+    )
+    assertEquals(RewardStatus.PLANNED.code, reward.status)
+
+    // 2. Make reward available
+    repository.makeRewardAvailable(reward.id)
+    val availableReward = dao.getRewardById(reward.id)
+    assertNotNull(availableReward)
+    assertEquals(RewardStatus.AVAILABLE.code, availableReward!!.status)
+
+    // 3. Child requests the reward
+    repository.requestRewardByChild(reward.id, child.id)
+    val claimedReward = dao.getRewardById(reward.id)
+    assertNotNull(claimedReward)
+    assertEquals(RewardStatus.CLAIMED.code, claimedReward!!.status)
+    assertNotNull(claimedReward.requestedAtMillis)
+
+    // 4. Parent fulfills the reward with note
+    repository.fulfillReward(reward.id, "كانت جلسة رائعة وممتعة جداً مع يوسف")
+    val fulfilledReward = dao.getRewardById(reward.id)
+    assertNotNull(fulfilledReward)
+    assertEquals(RewardStatus.FULFILLED.code, fulfilledReward!!.status)
+    assertNotNull(fulfilledReward.fulfilledAtMillis)
+
+    // Check history audit trail
+    val history = repository.getRewardHistory(reward.id)
+    assertTrue(history.size >= 4)
+  }
+
+  // ==========================================
+  // 16. Acceptance Test: Task Occurrence Postpone
+  // ==========================================
+
+  @Test
+  fun `test postponing task occurrence does not penalize child`() = runBlocking {
+    repository.setupInitialPin("123456")
+    repository.verifyPin("123456")
+
+    val child = repository.createChildProfile("سارة", AgeGroup.EARLY)
+    val task = repository.createParentTask(
+      title = "ترتيب الألعاب",
+      description = "وضع المكعبات في الصندوق",
+      recurrenceType = RecurrenceType.DAILY,
+      assignedChildIds = listOf(child.id),
+      requiresApproval = true
+    )
+
+    repository.syncTodayTasksForChild(child.id)
+    val occurrences = dao.getOccurrencesForChildOnDateSync(child.id, timeProvider.getTodayDateString())
+    assertEquals(1, occurrences.size)
+    val occurrence = occurrences[0]
+
+    // Postpone occurrence
+    repository.postponeTaskOccurrence(occurrence.id, "2026-09-22")
+    val postponed = dao.getOccurrenceById(occurrence.id)
+    assertNotNull(postponed)
+    assertEquals(TaskOccurrenceStatus.POSTPONED.code, postponed!!.status)
+    assertEquals("2026-09-22", postponed.postponedToDate)
+  }
+
+  // ==========================================
+  // 17. Acceptance Test: Encrypted Backup & Restore
+  // ==========================================
+
+  @Test
+  fun `test export encrypted backup and restore without data loss`() = runBlocking {
+    repository.setupInitialPin("123456")
+    repository.verifyPin("123456")
+
+    val child = repository.createChildProfile("عمر", AgeGroup.OLDER)
+    repository.createParentTask(
+      title = "مساعدة في إعداد المائدة",
+      description = "ترتيب الأطباق برفق",
+      recurrenceType = RecurrenceType.DAILY,
+      assignedChildIds = listOf(child.id),
+      requiresApproval = false
+    )
+    repository.createFamilyReward(
+      title = "نزهة بالدراجة",
+      description = "جولة في الحديقة",
+      rewardType = RewardType.SPECIAL_TIME,
+      childId = child.id,
+      grantMode = RewardGrantMode.MANUAL_BY_PARENT
+    )
+
+    // Export backup
+    val password = "StrongSecret123"
+    val encryptedPayload = repository.exportEncryptedBackupJson(password)
+    assertTrue(encryptedPayload.isNotBlank())
+    assertTrue(encryptedPayload.contains("AES-256-GCM"))
+
+    // Preview backup
+    val preview = repository.previewEncryptedBackup(encryptedPayload, password)
+    assertEquals(1, preview.childCount)
+    assertEquals(1, preview.taskCount)
+    assertEquals(1, preview.rewardCount)
+
+    // Delete all family data
+    repository.deleteAllFamilyData()
+    assertEquals(0, dao.getAllChildrenSync().size)
+    assertEquals(0, dao.getAllTasksSync().size)
+    assertEquals(0, dao.getAllRewardsSync().size)
+
+    // Restore from backup
+    val success = repository.restoreFromEncryptedBackup(encryptedPayload, password)
+    assertTrue(success)
+
+    val restoredChildren = dao.getAllChildrenSync()
+    assertEquals(1, restoredChildren.size)
+    assertEquals("عمر", restoredChildren[0].alias)
+
+    val restoredTasks = dao.getAllTasksSync()
+    assertEquals(1, restoredTasks.size)
+    assertEquals("مساعدة في إعداد المائدة", restoredTasks[0].title)
+
+    val restoredRewards = dao.getAllRewardsSync()
+    assertEquals(1, restoredRewards.size)
+    assertEquals("نزهة بالدراجة", restoredRewards[0].title)
+  }
+
+  // ==========================================
+  // 18. Acceptance Test: Editorial Content Review Records
+  // ==========================================
+
+  @Test
+  fun `test content review catalog contains documented sources and goals`() = runBlocking {
+    repository.ensureContentReviewCatalogPopulated()
+    val records = dao.getAllContentReviewRecordsSync()
+    assertTrue("Review catalog must contain seeded educational records", records.isNotEmpty())
+
+    for (record in records) {
+      assertTrue(record.contentId.isNotBlank())
+      assertTrue(record.title.isNotBlank())
+      assertTrue(record.sourceReference.isNotBlank())
+      assertTrue(record.pedagogicalGoal.isNotBlank())
+      assertEquals("REVIEWED_AND_APPROVED", record.reviewStatus)
     }
   }
 }

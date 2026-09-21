@@ -22,15 +22,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.Update
+import androidx.compose.material.icons.filled.VolunteerActivism
+import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -62,15 +68,21 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.batal.elyoum.data.AgeGroup
+import com.batal.elyoum.data.ContentReviewRecordEntity
+import com.batal.elyoum.data.FamilyRewardEntity
+import com.batal.elyoum.data.RewardStatus
+import com.batal.elyoum.data.RewardType
 import com.batal.elyoum.data.TaskOccurrenceEntity
 import com.batal.elyoum.data.TaskOccurrenceStatus
 import com.batal.elyoum.ui.DeedWithStatus
 import com.batal.elyoum.ui.HeroViewModel
+import com.batal.elyoum.ui.components.ContentReviewDialog
 import com.batal.elyoum.ui.theme.HeroGold
 import com.batal.elyoum.ui.theme.HeroGoldDark
 import com.batal.elyoum.ui.theme.HeroGoldLight
 import com.batal.elyoum.ui.theme.HeroGreen
 import com.batal.elyoum.ui.theme.HeroGreenContainer
+import java.time.LocalDate
 
 @Composable
 fun DailyDeedsScreen(
@@ -84,8 +96,11 @@ fun DailyDeedsScreen(
   val selectedChild by viewModel.selectedChild.collectAsState()
   val todayOccurrences by viewModel.todayChildOccurrences.collectAsState()
   val latestPraise by viewModel.latestPraiseMessage.collectAsState()
+  val activeRewards by viewModel.activeChildRewards.collectAsState()
 
   var showChildSwitchDialog by remember { mutableStateOf(false) }
+  var postponeTarget by remember { mutableStateOf<TaskOccurrenceEntity?>(null) }
+  var reviewDialogRecord by remember { mutableStateOf<ContentReviewRecordEntity?>(null) }
 
   val completedCount = deedsWithStatus.count { it.isCompleted }
   val totalCount = deedsWithStatus.size
@@ -93,6 +108,57 @@ fun DailyDeedsScreen(
   val maxPoints = deedsWithStatus.sumOf { it.deed.points }
   val progress = if (totalCount > 0) completedCount.toFloat() / totalCount.toFloat() else 0f
   val isAllCompleted = completedCount == totalCount && totalCount > 0
+
+  // Postpone Dialog
+  if (postponeTarget != null) {
+    val occ = postponeTarget!!
+    val tomorrow = LocalDate.now().plusDays(1).toString()
+    AlertDialog(
+      onDismissRequest = { postponeTarget = null },
+      title = {
+        Text("تأجيل المهمة برفق")
+      },
+      text = {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text(
+            text = "لا بأس بتأجيل «${occ.snapshotTitle}» لنتعاون عليها معاً في يوم آخر دون أي توبيخ أو قلق.",
+            style = MaterialTheme.typography.bodyMedium
+          )
+          Text(
+            text = "الموعد المقترح: غداً ($tomorrow)",
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Bold,
+            color = HeroGoldDark
+          )
+        }
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            viewModel.postponeTaskToday(occ.id, tomorrow)
+            postponeTarget = null
+          },
+          colors = ButtonDefaults.buttonColors(containerColor = HeroGoldDark),
+          modifier = Modifier.testTag("confirm_postpone_button")
+        ) {
+          Text("تأجيل لغدٍ")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { postponeTarget = null }) {
+          Text("إلغاء")
+        }
+      }
+    )
+  }
+
+  // Content Review Record Dialog
+  if (reviewDialogRecord != null) {
+    ContentReviewDialog(
+      record = reviewDialogRecord!!,
+      onDismiss = { reviewDialogRecord = null }
+    )
+  }
 
   LazyColumn(
     modifier = modifier
@@ -289,9 +355,36 @@ fun DailyDeedsScreen(
             occurrence = occ,
             onSubmit = { viewModel.submitTaskCompletion(occ.id) },
             onCancel = { viewModel.cancelTaskPendingApproval(occ.id) },
-            onSkip = { viewModel.skipTaskToday(occ.id) }
+            onSkip = { viewModel.skipTaskToday(occ.id) },
+            onPostpone = { postponeTarget = occ }
           )
         }
+      }
+
+      item {
+        Divider(
+          modifier = Modifier.padding(vertical = 4.dp),
+          color = MaterialTheme.colorScheme.outlineVariant
+        )
+      }
+    }
+
+    // --- Section: Family Moments & Rewards ---
+    if (selectedChild != null && activeRewards.isNotEmpty()) {
+      item {
+        Text(
+          text = "لحظات ومكافآت الأسرة لـ «${selectedChild!!.alias}»",
+          style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+          color = MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.padding(top = 4.dp)
+        )
+      }
+
+      items(activeRewards, key = { it.id }) { reward ->
+        ChildRewardCard(
+          reward = reward,
+          onRequest = { viewModel.requestRewardByChild(reward.id) }
+        )
       }
 
       item {
@@ -483,9 +576,12 @@ fun DailyDeedsScreen(
 
     // Deeds Checklist Items
     items(deedsWithStatus, key = { it.deed.id }) { item ->
+      val reviewRecords by viewModel.contentReviewRecords.collectAsState()
+      val record = reviewRecords.firstOrNull { it.contentId == "deed_${item.deed.id}" }
       DeedCard(
         item = item,
-        onToggle = { viewModel.toggleDeed(item.deed.id, item.isCompleted) }
+        onToggle = { viewModel.toggleDeed(item.deed.id, item.isCompleted) },
+        onReviewClick = if (record != null) { { reviewDialogRecord = record } } else null
       )
     }
 
@@ -578,7 +674,8 @@ fun ParentTaskOccurrenceCard(
   occurrence: TaskOccurrenceEntity,
   onSubmit: () -> Unit,
   onCancel: () -> Unit,
-  onSkip: () -> Unit
+  onSkip: () -> Unit,
+  onPostpone: () -> Unit
 ) {
   val status = TaskOccurrenceStatus.fromCode(occurrence.status)
 
@@ -591,7 +688,8 @@ fun ParentTaskOccurrenceCard(
       containerColor = when (status) {
         TaskOccurrenceStatus.COMPLETED -> HeroGreenContainer.copy(alpha = 0.35f)
         TaskOccurrenceStatus.SKIPPED -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-        TaskOccurrenceStatus.PENDING_APPROVAL -> HeroGold.copy(alpha = 0.12f)
+        TaskOccurrenceStatus.POSTPONED -> HeroGold.copy(alpha = 0.12f)
+        TaskOccurrenceStatus.PENDING_APPROVAL -> HeroGold.copy(alpha = 0.18f)
         TaskOccurrenceStatus.NOT_STARTED -> MaterialTheme.colorScheme.surface
       }
     ),
@@ -626,6 +724,7 @@ fun ParentTaskOccurrenceCard(
               when (status) {
                 TaskOccurrenceStatus.COMPLETED -> HeroGreen.copy(alpha = 0.15f)
                 TaskOccurrenceStatus.PENDING_APPROVAL -> HeroGold.copy(alpha = 0.25f)
+                TaskOccurrenceStatus.POSTPONED -> HeroGold.copy(alpha = 0.25f)
                 TaskOccurrenceStatus.SKIPPED -> MaterialTheme.colorScheme.outlineVariant
                 TaskOccurrenceStatus.NOT_STARTED -> MaterialTheme.colorScheme.surfaceVariant
               }
@@ -638,6 +737,7 @@ fun ParentTaskOccurrenceCard(
             color = when (status) {
               TaskOccurrenceStatus.COMPLETED -> HeroGreen
               TaskOccurrenceStatus.PENDING_APPROVAL -> HeroGoldDark
+              TaskOccurrenceStatus.POSTPONED -> HeroGoldDark
               TaskOccurrenceStatus.SKIPPED -> MaterialTheme.colorScheme.outline
               TaskOccurrenceStatus.NOT_STARTED -> MaterialTheme.colorScheme.onSurfaceVariant
             }
@@ -670,23 +770,33 @@ fun ParentTaskOccurrenceCard(
         TaskOccurrenceStatus.NOT_STARTED -> {
           Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
           ) {
             Button(
               onClick = onSubmit,
               colors = ButtonDefaults.buttonColors(containerColor = HeroGoldDark),
-              modifier = Modifier.weight(1f).testTag("submit_occurrence_${occurrence.id}")
+              modifier = Modifier.weight(1.2f).testTag("submit_occurrence_${occurrence.id}")
             ) {
-              Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-              Spacer(modifier = Modifier.width(6.dp))
+              Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(modifier = Modifier.width(4.dp))
               Text("أنجزتها")
             }
 
             OutlinedButton(
-              onClick = onSkip,
-              modifier = Modifier.weight(1f).testTag("skip_occurrence_${occurrence.id}")
+              onClick = onPostpone,
+              modifier = Modifier.weight(1f).testTag("postpone_occurrence_${occurrence.id}")
             ) {
-              Text("هعدّيها النهارده")
+              Icon(Icons.Default.Update, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(modifier = Modifier.width(4.dp))
+              Text("تأجيل")
+            }
+
+            TextButton(
+              onClick = onSkip,
+              modifier = Modifier.weight(0.9f).testTag("skip_occurrence_${occurrence.id}")
+            ) {
+              Text("تخطي")
             }
           }
         }
@@ -726,6 +836,21 @@ fun ParentTaskOccurrenceCard(
             )
           }
         }
+        TaskOccurrenceStatus.POSTPONED -> {
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Update, contentDescription = null, tint = HeroGoldDark, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+              text = if (!occurrence.postponedToDate.isNullOrBlank()) {
+                "مؤجلة إلى تاريخ ${occurrence.postponedToDate} برفق، سنحاول معاً في ذلك اليوم!"
+              } else {
+                "مؤجلة برفق لنتعاون عليها لاحقاً دون أي ضغط!"
+              },
+              style = MaterialTheme.typography.bodySmall,
+              color = HeroGoldDark
+            )
+          }
+        }
         TaskOccurrenceStatus.SKIPPED -> {
           Text(
             text = "تم تخطي هذه المهمة اليوم بدون أي لوم، غدًا يوم جديد!",
@@ -739,6 +864,150 @@ fun ParentTaskOccurrenceCard(
 }
 
 // ==========================================
+// --- Child Reward Card ---
+// ==========================================
+
+@Composable
+fun ChildRewardCard(
+  reward: FamilyRewardEntity,
+  onRequest: () -> Unit
+) {
+  val status = RewardStatus.fromCode(reward.status)
+  val type = RewardType.fromCode(reward.rewardType)
+
+  Card(
+    modifier = Modifier
+      .fillMaxWidth()
+      .testTag("child_reward_${reward.id}"),
+    shape = RoundedCornerShape(18.dp),
+    colors = CardDefaults.cardColors(
+      containerColor = when (status) {
+        RewardStatus.AVAILABLE -> HeroGold.copy(alpha = 0.12f)
+        RewardStatus.CLAIMED -> Color(0xFFEFF6FF)
+        RewardStatus.FULFILLED -> HeroGreenContainer.copy(alpha = 0.35f)
+        else -> MaterialTheme.colorScheme.surface
+      }
+    ),
+    border = CardDefaults.outlinedCardBorder().copy(
+      brush = if (status == RewardStatus.AVAILABLE) Brush.linearGradient(listOf(HeroGold, HeroGoldLight)) else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent))
+    )
+  ) {
+    Column(modifier = Modifier.padding(16.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+          Box(
+            modifier = Modifier
+              .size(38.dp)
+              .clip(CircleShape)
+              .background(HeroGold.copy(alpha = 0.2f)),
+            contentAlignment = Alignment.Center
+          ) {
+            Icon(
+              imageVector = when (type) {
+                RewardType.SHARED_ACTIVITY -> Icons.Default.VolunteerActivism
+                RewardType.SPECIAL_TIME -> Icons.Default.Star
+                RewardType.NEW_EXPERIENCE -> Icons.Default.Explore
+                RewardType.TOKEN_GIFT -> Icons.Default.WorkspacePremium
+              },
+              contentDescription = null,
+              tint = HeroGoldDark,
+              modifier = Modifier.size(20.dp)
+            )
+          }
+          Spacer(modifier = Modifier.width(10.dp))
+          Column {
+            Text(
+              text = reward.title,
+              style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+              color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+              text = type.label,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+          }
+        }
+
+        // Status badge
+        Surface(
+          shape = RoundedCornerShape(8.dp),
+          color = when (status) {
+            RewardStatus.AVAILABLE -> HeroGold.copy(alpha = 0.2f)
+            RewardStatus.CLAIMED -> Color(0xFF2563EB).copy(alpha = 0.15f)
+            RewardStatus.FULFILLED -> HeroGreen.copy(alpha = 0.15f)
+            else -> MaterialTheme.colorScheme.surfaceVariant
+          }
+        ) {
+          Text(
+            text = status.label,
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+            color = when (status) {
+              RewardStatus.AVAILABLE -> HeroGoldDark
+              RewardStatus.CLAIMED -> Color(0xFF2563EB)
+              RewardStatus.FULFILLED -> HeroGreen
+              else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+          )
+        }
+      }
+
+      if (reward.description.isNotBlank()) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+          text = reward.description,
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+      }
+
+      Spacer(modifier = Modifier.height(10.dp))
+
+      when (status) {
+        RewardStatus.AVAILABLE -> {
+          Button(
+            onClick = onRequest,
+            colors = ButtonDefaults.buttonColors(containerColor = HeroGoldDark),
+            modifier = Modifier.fillMaxWidth().testTag("request_reward_${reward.id}")
+          ) {
+            Icon(Icons.Default.CardGiftcard, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("أود تحقيق هذه اللحظة مع الأهل! 🌟")
+          }
+        }
+        RewardStatus.CLAIMED -> {
+          Text(
+            text = "تم طلب هذه اللحظة! استعد لوقت ممتع ومميز مع الأسرة قريباً 🎉",
+            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+            color = Color(0xFF1D4ED8)
+          )
+        }
+        RewardStatus.PLANNED -> {
+          Text(
+            text = "مخطط لهذه اللحظة الرائعة، وستتاح لك قريباً بكل حب ✨",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+        }
+        RewardStatus.FULFILLED -> {
+          Text(
+            text = "تمت مشاركة هذه اللحظة الجميلة وصنعنا ذكريات لا تُنسى! ❤️",
+            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+            color = HeroGreen
+          )
+        }
+        else -> {}
+      }
+    }
+  }
+}
+
+// ==========================================
 // --- General Deed Card ---
 // ==========================================
 
@@ -746,6 +1015,7 @@ fun ParentTaskOccurrenceCard(
 fun DeedCard(
   item: DeedWithStatus,
   onToggle: () -> Unit,
+  onReviewClick: (() -> Unit)? = null,
   modifier: Modifier = Modifier
 ) {
   val isCompleted = item.isCompleted
@@ -804,16 +1074,33 @@ fun DeedCard(
             color = if (isCompleted) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurface
           )
 
-          Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = if (isCompleted) HeroGreenContainer else HeroGold.copy(alpha = 0.15f)
-          ) {
-            Text(
-              text = "+${deed.points} نقطة",
-              style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-              color = if (isCompleted) Color(0xFF065F46) else HeroGoldDark,
-              modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-            )
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            if (onReviewClick != null) {
+              IconButton(
+                onClick = onReviewClick,
+                modifier = Modifier.size(32.dp).testTag("deed_review_${deed.id}")
+              ) {
+                Icon(
+                  imageVector = Icons.Default.MenuBook,
+                  contentDescription = "التوثيق والهدف التربوي",
+                  tint = HeroGoldDark,
+                  modifier = Modifier.size(18.dp)
+                )
+              }
+              Spacer(modifier = Modifier.width(4.dp))
+            }
+
+            Surface(
+              shape = RoundedCornerShape(10.dp),
+              color = if (isCompleted) HeroGreenContainer else HeroGold.copy(alpha = 0.15f)
+            ) {
+              Text(
+                text = "+${deed.points} نقطة",
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                color = if (isCompleted) Color(0xFF065F46) else HeroGoldDark,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+              )
+            }
           }
         }
 

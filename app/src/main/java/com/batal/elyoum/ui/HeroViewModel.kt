@@ -6,9 +6,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.batal.elyoum.data.AgeGroup
+import com.batal.elyoum.data.AppSettingsEntity
 import com.batal.elyoum.data.ChildProfileEntity
+import com.batal.elyoum.data.ContentReviewRecordEntity
 import com.batal.elyoum.data.DailyDeed
 import com.batal.elyoum.data.DefaultTimeProvider
+import com.batal.elyoum.data.FamilyRewardEntity
+import com.batal.elyoum.data.FamilyRewardHistoryEntity
 import com.batal.elyoum.data.Hero
 import com.batal.elyoum.data.HeroCategory
 import com.batal.elyoum.data.HeroRepository
@@ -16,6 +20,9 @@ import com.batal.elyoum.data.HonoredHeroEntity
 import com.batal.elyoum.data.ParentSecurityEntity
 import com.batal.elyoum.data.ParentTaskEntity
 import com.batal.elyoum.data.RecurrenceType
+import com.batal.elyoum.data.RewardGrantMode
+import com.batal.elyoum.data.RewardStatus
+import com.batal.elyoum.data.RewardType
 import com.batal.elyoum.data.TaskOccurrenceEntity
 import com.batal.elyoum.data.TaskOccurrenceStatus
 import com.batal.elyoum.data.TimeProvider
@@ -297,6 +304,10 @@ class HeroViewModel(
         }
       }
     }
+
+    viewModelScope.launch {
+      repository.ensureContentReviewCatalogPopulated()
+    }
   }
 
   fun selectChild(childId: String) {
@@ -401,7 +412,7 @@ class HeroViewModel(
       try {
         val updated = repository.submitChildTaskCompletion(occurrenceId, childId)
         if (updated.status == TaskOccurrenceStatus.COMPLETED.code) {
-          _latestPraiseMessage.value = repository.getRandomEffortPraise()
+          _latestPraiseMessage.value = repository.getEffortPraiseForOccurrence(updated)
         }
       } catch (e: Exception) {
         _errorMessage.value = e.message ?: "تعذر إرسال إنجاز المهمة، يرجى المحاولة مرة أخرى."
@@ -443,6 +454,21 @@ class HeroViewModel(
     }
   }
 
+  fun postponeTaskToday(occurrenceId: String, targetDateStr: String) {
+    val childId = selectedChild.value?.id
+    if (childId == null) {
+      _errorMessage.value = "يرجى اختيار ملف الطفل أولاً"
+      return
+    }
+    viewModelScope.launch {
+      try {
+        repository.postponeTaskToday(occurrenceId, childId, targetDateStr)
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "حدث خطأ أثناء تأجيل المهمة"
+      }
+    }
+  }
+
   fun approveTaskOccurrence(occurrenceId: String) {
     viewModelScope.launch {
       repository.approveTaskOccurrence(occurrenceId)
@@ -464,6 +490,8 @@ class HeroViewModel(
     targetDaysOfWeek: List<Int>,
     assignedChildIds: List<String>,
     startDate: String = repository.getTodayDateString(),
+    ageGroup: String = "ALL",
+    category: String = "GENERAL",
     onComplete: () -> Unit = {}
   ) {
     viewModelScope.launch {
@@ -474,7 +502,9 @@ class HeroViewModel(
         recurrenceType = recurrenceType,
         targetDaysOfWeek = targetDaysOfWeek,
         assignedChildIds = assignedChildIds,
-        startDate = startDate
+        startDate = startDate,
+        ageGroup = ageGroup,
+        category = category
       )
       selectedChild.value?.let { child ->
         if (assignedChildIds.contains(child.id)) {
@@ -494,6 +524,8 @@ class HeroViewModel(
     targetDaysOfWeek: List<Int>,
     assignedChildIds: List<String>,
     startDate: String = repository.getTodayDateString(),
+    ageGroup: String = "ALL",
+    category: String = "GENERAL",
     onComplete: () -> Unit = {}
   ) {
     viewModelScope.launch {
@@ -505,7 +537,9 @@ class HeroViewModel(
         recurrenceType = recurrenceType,
         targetDaysOfWeek = targetDaysOfWeek,
         assignedChildIds = assignedChildIds,
-        startDate = startDate
+        startDate = startDate,
+        ageGroup = ageGroup,
+        category = category
       )
       selectedChild.value?.let { child ->
         repository.syncOccurrencesForChildAndDate(child.id, repository.getTodayDateString())
@@ -575,6 +609,290 @@ class HeroViewModel(
       _isParentSessionUnlocked.value = true
     }
     return success
+  }
+
+  // ==========================================
+  // --- Family Rewards & Moments ---
+  // ==========================================
+
+  @OptIn(ExperimentalCoroutinesApi::class)
+  val childRewards: StateFlow<List<FamilyRewardEntity>> = selectedChildId.flatMapLatest { childId ->
+    if (childId != null) {
+      repository.getRewardsForChild(childId)
+    } else {
+      flowOf(emptyList())
+    }
+  }.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  @OptIn(ExperimentalCoroutinesApi::class)
+  val activeChildRewards: StateFlow<List<FamilyRewardEntity>> = selectedChildId.flatMapLatest { childId ->
+    if (childId != null) {
+      repository.getActiveRewardsForChild(childId)
+    } else {
+      flowOf(emptyList())
+    }
+  }.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  fun createFamilyReward(
+    title: String,
+    description: String,
+    rewardType: RewardType,
+    childId: String,
+    grantMode: RewardGrantMode,
+    goalCriteria: String? = null,
+    targetDate: String? = null,
+    initialStatus: RewardStatus = RewardStatus.PLANNED,
+    onComplete: () -> Unit = {}
+  ) {
+    viewModelScope.launch {
+      try {
+        repository.createFamilyReward(
+          title = title,
+          description = description,
+          rewardType = rewardType,
+          childId = childId,
+          grantMode = grantMode,
+          goalCriteria = goalCriteria,
+          targetDate = targetDate,
+          initialStatus = initialStatus
+        )
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "حدث خطأ أثناء إضافة المكافأة"
+      }
+    }
+  }
+
+  fun updateFamilyReward(
+    rewardId: String,
+    title: String,
+    description: String,
+    rewardType: RewardType,
+    childId: String,
+    grantMode: RewardGrantMode,
+    goalCriteria: String? = null,
+    targetDate: String? = null,
+    onComplete: () -> Unit = {}
+  ) {
+    viewModelScope.launch {
+      try {
+        repository.updateFamilyReward(
+          rewardId = rewardId,
+          title = title,
+          description = description,
+          rewardType = rewardType,
+          childId = childId,
+          grantMode = grantMode,
+          goalCriteria = goalCriteria,
+          targetDate = targetDate
+        )
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "حدث خطأ أثناء تعديل المكافأة"
+      }
+    }
+  }
+
+  fun makeRewardAvailable(rewardId: String, onComplete: () -> Unit = {}) {
+    viewModelScope.launch {
+      try {
+        repository.makeRewardAvailable(rewardId)
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "تعذر إتاحة المكافأة"
+      }
+    }
+  }
+
+  fun requestRewardByChild(rewardId: String, onComplete: () -> Unit = {}) {
+    val childId = selectedChild.value?.id ?: return
+    viewModelScope.launch {
+      try {
+        repository.requestRewardByChild(rewardId, childId)
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "تعذر إرسال طلب المكافأة"
+      }
+    }
+  }
+
+  fun fulfillReward(rewardId: String, note: String? = null, onComplete: () -> Unit = {}) {
+    viewModelScope.launch {
+      try {
+        repository.fulfillReward(rewardId, note)
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "تعذر تسجيل إتمام المكافأة"
+      }
+    }
+  }
+
+  fun cancelReward(rewardId: String, gentleReason: String, onComplete: () -> Unit = {}) {
+    viewModelScope.launch {
+      try {
+        repository.cancelReward(rewardId, gentleReason)
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "تعذر إلغاء المكافأة"
+      }
+    }
+  }
+
+  suspend fun getRewardHistory(rewardId: String): List<FamilyRewardHistoryEntity> {
+    return repository.getRewardHistory(rewardId)
+  }
+
+  // ==========================================
+  // --- Weekly Summary ---
+  // ==========================================
+
+  private val _weeklySummary = MutableStateFlow<HeroRepository.WeeklySummaryData?>(null)
+  val weeklySummary: StateFlow<HeroRepository.WeeklySummaryData?> = _weeklySummary.asStateFlow()
+
+  fun loadWeeklySummary(childId: String, startDate: String, endDate: String) {
+    viewModelScope.launch {
+      try {
+        val summary = repository.calculateWeeklySummary(childId, startDate, endDate)
+        _weeklySummary.value = summary
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "تعذر تحميل الملخص الأسبوعي"
+      }
+    }
+  }
+
+  // ==========================================
+  // --- Content Review Records ---
+  // ==========================================
+
+  val contentReviewRecords: StateFlow<List<ContentReviewRecordEntity>> = repository.getAllContentReviewRecords().stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  fun getContentReview(contentId: String) = repository.getContentReviewRecord(contentId)
+
+  suspend fun getContentReviewSync(contentId: String) = repository.getContentReviewRecordSync(contentId)
+
+  // ==========================================
+  // --- App Settings ---
+  // ==========================================
+
+  val appSettings: StateFlow<AppSettingsEntity> = repository.getAppSettings().stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = AppSettingsEntity()
+  )
+
+  fun updateThemeMode(themeMode: String) {
+    viewModelScope.launch {
+      repository.updateThemeMode(themeMode)
+    }
+  }
+
+  fun updateNotificationSettings(enabled: Boolean, startHour: Int, endHour: Int, hideOnLock: Boolean) {
+    viewModelScope.launch {
+      repository.updateNotificationSettings(enabled, startHour, endHour, hideOnLock)
+    }
+  }
+
+  fun updateReduceMotion(reduce: Boolean) {
+    viewModelScope.launch {
+      repository.updateReduceMotion(reduce)
+    }
+  }
+
+  // ==========================================
+  // --- Backup, Restore & Deletion ---
+  // ==========================================
+
+  fun exportBackup(
+    password: String,
+    onSuccess: (String) -> Unit,
+    onError: (String) -> Unit
+  ) {
+    viewModelScope.launch {
+      try {
+        val json = repository.exportEncryptedBackupJson(password)
+        onSuccess(json)
+      } catch (e: Exception) {
+        onError(e.message ?: "تعذر تصدير النسخة الاحتياطية")
+      }
+    }
+  }
+
+  fun previewBackup(
+    encryptedJson: String,
+    password: String,
+    onPreview: (HeroRepository.BackupPreviewInfo) -> Unit,
+    onError: (String) -> Unit
+  ) {
+    viewModelScope.launch {
+      try {
+        val preview = repository.previewEncryptedBackup(encryptedJson, password)
+        onPreview(preview)
+      } catch (e: Exception) {
+        onError(e.message ?: "تعذر قراءة النسخة الاحتياطية")
+      }
+    }
+  }
+
+  fun restoreBackup(
+    encryptedJson: String,
+    password: String,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+  ) {
+    viewModelScope.launch {
+      try {
+        val success = repository.restoreFromEncryptedBackup(encryptedJson, password)
+        if (success) {
+          // Re-sync current child
+          selectedChild.value?.let { child ->
+            syncTodayTasksForChild(child.id)
+          }
+          onSuccess()
+        } else {
+          onError("تعذر استعادة البيانات")
+        }
+      } catch (e: Exception) {
+        onError(e.message ?: "حدث خطأ أثناء الاستعادة")
+      }
+    }
+  }
+
+  fun deleteChildPermanently(childId: String, onComplete: () -> Unit) {
+    viewModelScope.launch {
+      try {
+        repository.deleteChildProfilePermanently(childId)
+        if (_selectedChildId.value == childId) {
+          _selectedChildId.value = null
+        }
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "تعذر حذف ملف الطفل"
+      }
+    }
+  }
+
+  fun deleteAllFamilyData(onComplete: () -> Unit) {
+    viewModelScope.launch {
+      try {
+        repository.deleteAllFamilyData()
+        _selectedChildId.value = null
+        onComplete()
+      } catch (e: Exception) {
+        _errorMessage.value = e.message ?: "تعذر حذف جميع البيانات"
+      }
+    }
   }
 
   class Factory(

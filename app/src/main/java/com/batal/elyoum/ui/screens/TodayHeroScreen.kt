@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.Button
@@ -42,6 +43,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,6 +58,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.batal.elyoum.ui.HeroViewModel
+import com.batal.elyoum.ui.components.ContentReviewDialog
 import com.batal.elyoum.ui.components.HeroAvatarBadge
 import com.batal.elyoum.ui.components.HeroCategoryChip
 import com.batal.elyoum.ui.components.QuoteDisplayCard
@@ -78,6 +83,16 @@ fun TodayHeroScreen(
 
   val context = LocalContext.current
   val scrollState = rememberScrollState()
+
+  var showReviewDialog by remember { mutableStateOf(false) }
+  val currentReviewRecord by viewModel.getContentReview("hero_${selectedHero.id}").collectAsState(initial = null)
+
+  if (showReviewDialog && currentReviewRecord != null) {
+    ContentReviewDialog(
+      record = currentReviewRecord!!,
+      onDismiss = { showReviewDialog = false }
+    )
+  }
 
   Column(
     modifier = modifier
@@ -121,6 +136,20 @@ fun TodayHeroScreen(
       }
 
       Row(verticalAlignment = Alignment.CenterVertically) {
+        // Content Review / Documentation action
+        if (currentReviewRecord != null) {
+          IconButton(
+            onClick = { showReviewDialog = true },
+            modifier = Modifier.testTag("content_review_button")
+          ) {
+            Icon(
+              imageVector = Icons.Default.MenuBook,
+              contentDescription = "المصدر والتوثيق",
+              tint = HeroGold
+            )
+          }
+        }
+
         // Favorite action
         IconButton(
           onClick = { viewModel.toggleFavorite(selectedHero.id, isFavorite) },

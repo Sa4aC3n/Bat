@@ -92,6 +92,11 @@ import com.batal.elyoum.data.ParentTaskEntity
 import com.batal.elyoum.data.RecurrenceType
 import com.batal.elyoum.data.TaskOccurrenceEntity
 import com.batal.elyoum.ui.HeroViewModel
+import com.batal.elyoum.ui.screens.parent.BackupTabContent
+import com.batal.elyoum.ui.screens.parent.ContentReviewTabContent
+import com.batal.elyoum.ui.screens.parent.RewardsTabContent
+import com.batal.elyoum.ui.screens.parent.SettingsTabContent
+import com.batal.elyoum.ui.screens.parent.WeeklySummaryTabContent
 import com.batal.elyoum.ui.theme.HeroGold
 import com.batal.elyoum.ui.theme.HeroGoldDark
 import com.batal.elyoum.ui.theme.HeroGoldLight
@@ -104,6 +109,11 @@ enum class ParentSectionTab(val title: String) {
   CHILDREN("الأطفال"),
   TASKS("إدارة المهام"),
   APPROVALS("طلبات الاعتماد"),
+  REWARDS("مكافآت ولحظات"),
+  WEEKLY_SUMMARY("الملخص الأسبوعي"),
+  BACKUP("النسخ الاحتياطي"),
+  SETTINGS("الإعدادات"),
+  CONTENT_REVIEW("توثيق المحتوى"),
   SECURITY("الأمان والرمز")
 }
 
@@ -242,6 +252,33 @@ fun ParentsSectionScreen(
               children = activeChildren,
               onApprove = { viewModel.approveTaskOccurrence(it.id) },
               onRetry = { occurrenceToRetry = it }
+            )
+          }
+          ParentSectionTab.REWARDS -> {
+            RewardsTabContent(
+              viewModel = viewModel,
+              children = activeChildren
+            )
+          }
+          ParentSectionTab.WEEKLY_SUMMARY -> {
+            WeeklySummaryTabContent(
+              viewModel = viewModel,
+              children = activeChildren
+            )
+          }
+          ParentSectionTab.BACKUP -> {
+            BackupTabContent(
+              viewModel = viewModel
+            )
+          }
+          ParentSectionTab.SETTINGS -> {
+            SettingsTabContent(
+              viewModel = viewModel
+            )
+          }
+          ParentSectionTab.CONTENT_REVIEW -> {
+            ContentReviewTabContent(
+              viewModel = viewModel
             )
           }
           ParentSectionTab.SECURITY -> {
