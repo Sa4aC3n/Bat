@@ -7,8 +7,12 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 object SecurityUtils {
-  private const val ITERATIONS = 10_000
-  private const val KEY_LENGTH = 256
+  const val DEFAULT_ALGORITHM = "PBKDF2WithHmacSHA256"
+  const val DEFAULT_ITERATIONS = 10_000
+  const val DEFAULT_KEY_LENGTH = 256
+  const val DEFAULT_ALGO_VERSION = 1
+  const val LEGACY_ALGORITHM_SHA256_MULTI = "SHA256_MULTI_ROUND"
+
   private const val SALT_BYTES = 16
 
   fun generateSalt(): String {
@@ -18,27 +22,52 @@ object SecurityUtils {
     return Base64.encodeToString(salt, Base64.NO_WRAP)
   }
 
-  fun hashPin(pin: String, saltBase64: String): String {
+  fun isValidPinFormat(pin: String): Boolean {
+    return pin.length == 6 && pin.all { it.isDigit() }
+  }
+
+  fun hashPin(
+    pin: String,
+    saltBase64: String,
+    algorithm: String = DEFAULT_ALGORITHM,
+    iterations: Int = DEFAULT_ITERATIONS,
+    keyLength: Int = DEFAULT_KEY_LENGTH
+  ): String {
+    require(isValidPinFormat(pin)) { "يجب أن يتكون رمز المرور من ٦ أرقام" }
     val salt = Base64.decode(saltBase64, Base64.NO_WRAP)
-    return try {
-      val spec = PBEKeySpec(pin.toCharArray(), salt, ITERATIONS, KEY_LENGTH)
-      val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-      val hash = factory.generateSecret(spec).encoded
-      Base64.encodeToString(hash, Base64.NO_WRAP)
-    } catch (e: Exception) {
-      // Robust fallback to multi-round SHA-256 if PBKDF2 algorithm is unavailable in local test environment
-      val md = MessageDigest.getInstance("SHA-256")
-      var hash = md.digest(salt + pin.toByteArray(Charsets.UTF_8))
-      for (i in 1 until ITERATIONS) {
-        hash = md.digest(hash)
+    return when (algorithm) {
+      DEFAULT_ALGORITHM -> {
+        val spec = PBEKeySpec(pin.toCharArray(), salt, iterations, keyLength)
+        val factory = SecretKeyFactory.getInstance(algorithm)
+        val hash = factory.generateSecret(spec).encoded
+        Base64.encodeToString(hash, Base64.NO_WRAP)
       }
-      Base64.encodeToString(hash, Base64.NO_WRAP)
+      LEGACY_ALGORITHM_SHA256_MULTI -> {
+        val md = MessageDigest.getInstance("SHA-256")
+        var hash = md.digest(salt + pin.toByteArray(Charsets.UTF_8))
+        for (i in 1 until iterations) {
+          hash = md.digest(hash)
+        }
+        Base64.encodeToString(hash, Base64.NO_WRAP)
+      }
+      else -> throw IllegalArgumentException("خوارزمية التشفير غير مدعومة: $algorithm")
     }
   }
 
-  fun verifyPin(enteredPin: String, saltBase64: String, expectedHash: String): Boolean {
-    if (enteredPin.length != 6) return false
-    val calculated = hashPin(enteredPin, saltBase64)
+  fun verifyPin(
+    enteredPin: String,
+    saltBase64: String,
+    expectedHash: String,
+    algorithm: String = DEFAULT_ALGORITHM,
+    iterations: Int = DEFAULT_ITERATIONS,
+    keyLength: Int = DEFAULT_KEY_LENGTH
+  ): Boolean {
+    if (!isValidPinFormat(enteredPin)) return false
+    val calculated = try {
+      hashPin(enteredPin, saltBase64, algorithm, iterations, keyLength)
+    } catch (e: Exception) {
+      return false
+    }
     return constantTimeEquals(calculated, expectedHash)
   }
 
@@ -49,6 +78,15 @@ object SecurityUtils {
       result = result or (a[i].code xor b[i].code)
     }
     return result == 0
+  }
+
+  fun isLockedOut(failedAttempts: Int, lockoutUntilMillis: Long, currentMillis: Long = System.currentTimeMillis()): Boolean {
+    return lockoutUntilMillis > currentMillis
+  }
+
+  fun getRemainingLockoutSeconds(failedAttempts: Int, lockoutUntilMillis: Long, currentMillis: Long = System.currentTimeMillis()): Long {
+    val diff = lockoutUntilMillis - currentMillis
+    return if (diff > 0) (diff + 999) / 1000 else 0L
   }
 
   fun getLockoutDurationMillis(failedAttempts: Int): Long {

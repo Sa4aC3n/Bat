@@ -288,11 +288,11 @@ fun ParentsSectionScreen(
         showAddTaskDialog = false
         taskToEdit = null
       },
-      onSave = { title, desc, reqApproval, recurrence, days, assignedKids ->
+      onSave = { title, desc, reqApproval, recurrence, days, assignedKids, startDate ->
         if (taskToEdit == null) {
-          viewModel.createParentTask(title, desc, reqApproval, recurrence, days, assignedKids)
+          viewModel.createParentTask(title, desc, reqApproval, recurrence, days, assignedKids, startDate)
         } else {
-          viewModel.updateParentTask(taskToEdit!!.id, title, desc, reqApproval, recurrence, days, assignedKids)
+          viewModel.updateParentTask(taskToEdit!!.id, title, desc, reqApproval, recurrence, days, assignedKids, startDate)
         }
         showAddTaskDialog = false
         taskToEdit = null
@@ -1100,13 +1100,18 @@ private fun TaskEditorDialog(
     requiresApproval: Boolean,
     recurrence: RecurrenceType,
     days: List<Int>,
-    assignedKids: List<String>
+    assignedKids: List<String>,
+    startDate: String
   ) -> Unit
 ) {
+  val defaultDate = remember {
+    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+  }
   val coroutineScope = rememberCoroutineScope()
   var title by remember { mutableStateOf(initialTask?.title ?: "") }
   var description by remember { mutableStateOf(initialTask?.description ?: "") }
   var requiresApproval by remember { mutableStateOf(initialTask?.requiresApproval ?: false) }
+  var startDate by remember { mutableStateOf(initialTask?.startDate ?: defaultDate) }
   var recurrence by remember {
     mutableStateOf(initialTask?.let { RecurrenceType.fromCode(it.recurrenceType) } ?: RecurrenceType.DAILY)
   }
@@ -1156,6 +1161,14 @@ private fun TaskEditorDialog(
           label = { Text("وصف تشجيعي لطيف") },
           placeholder = { Text("مثال: رتّب غطائك ووسادتك لبدء يوم مريح") },
           modifier = Modifier.fillMaxWidth().testTag("task_desc_input")
+        )
+
+        OutlinedTextField(
+          value = startDate,
+          onValueChange = { startDate = it },
+          label = { Text("تاريخ بدء المهمة (YYYY-MM-DD)") },
+          placeholder = { Text(defaultDate) },
+          modifier = Modifier.fillMaxWidth().testTag("task_start_date_input")
         )
 
         if (errorText != null) {
@@ -1256,13 +1269,15 @@ private fun TaskEditorDialog(
             errorText = "يرجى اختيار طفل واحد على الأقل للمهمة"
             return@Button
           }
+          val cleanDate = if (startDate.isBlank()) defaultDate else startDate.trim()
           onSave(
             title.trim(),
             description.trim(),
             requiresApproval,
             recurrence,
             emptyList(),
-            assignedKids.toList()
+            assignedKids.toList(),
+            cleanDate
           )
         },
         colors = ButtonDefaults.buttonColors(containerColor = HeroGoldDark),

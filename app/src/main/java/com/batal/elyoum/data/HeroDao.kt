@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -76,8 +77,34 @@ interface HeroDao {
   @Query("UPDATE parent_tasks SET isArchived = 1 WHERE id = :taskId")
   suspend fun archiveTask(taskId: String)
 
-  @Query("UPDATE parent_tasks SET title = :title, description = :description, requiresApproval = :requiresApproval, recurrenceType = :recurrenceType, targetDaysOfWeek = :targetDaysOfWeek WHERE id = :taskId")
-  suspend fun updateTask(taskId: String, title: String, description: String, requiresApproval: Boolean, recurrenceType: String, targetDaysOfWeek: String)
+  @Query("UPDATE parent_tasks SET title = :title, description = :description, requiresApproval = :requiresApproval, recurrenceType = :recurrenceType, targetDaysOfWeek = :targetDaysOfWeek, startDate = :startDate WHERE id = :taskId")
+  suspend fun updateTask(taskId: String, title: String, description: String, requiresApproval: Boolean, recurrenceType: String, targetDaysOfWeek: String, startDate: String)
+
+  @Transaction
+  suspend fun insertTaskWithAssignments(task: ParentTaskEntity, assignments: List<TaskAssignmentEntity>) {
+    insertTask(task)
+    deleteAssignmentsForTask(task.id)
+    if (assignments.isNotEmpty()) {
+      insertAssignments(assignments)
+    }
+  }
+
+  @Transaction
+  suspend fun updateTaskWithAssignments(task: ParentTaskEntity, assignments: List<TaskAssignmentEntity>) {
+    updateTask(
+      taskId = task.id,
+      title = task.title,
+      description = task.description,
+      requiresApproval = task.requiresApproval,
+      recurrenceType = task.recurrenceType,
+      targetDaysOfWeek = task.targetDaysOfWeek,
+      startDate = task.startDate
+    )
+    deleteAssignmentsForTask(task.id)
+    if (assignments.isNotEmpty()) {
+      insertAssignments(assignments)
+    }
+  }
 
   // --- Task Assignments ---
   @Query("SELECT * FROM task_assignments WHERE taskId = :taskId")

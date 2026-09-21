@@ -7,8 +7,38 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-class HeroRepository(context: Context) {
-  private val heroDao: HeroDao = HeroDatabase.getDatabase(context).heroDao()
+class HeroRepository(
+  context: Context,
+  dao: HeroDao? = null
+) {
+  private val heroDao: HeroDao = dao ?: HeroDatabase.getDatabase(context).heroDao()
+
+  @Volatile
+  private var isParentSessionAuthenticated: Boolean = false
+
+  fun isParentSessionActive(): Boolean = isParentSessionAuthenticated
+
+  fun lockParentSession() {
+    isParentSessionAuthenticated = false
+  }
+
+  fun setParentSessionAuthenticatedForTesting(authenticated: Boolean) {
+    isParentSessionAuthenticated = authenticated
+  }
+
+  private fun ensureParentSessionAuthenticated() {
+    if (!isParentSessionAuthenticated) {
+      throw SecurityException("عمليات قسم الوالدين تتطلب فتح جلسة مصادق عليها أولاً")
+    }
+  }
+
+  suspend fun unlockWithDeviceAuth(isDeviceAuthConfirmed: Boolean): Boolean {
+    if (!isDeviceAuthConfirmed) return false
+    val sec = heroDao.getParentSecurity()
+    if (sec == null || !sec.isConfigured) return false
+    isParentSessionAuthenticated = true
+    return true
+  }
 
   val allHonoredHeroes: Flow<List<HonoredHeroEntity>> = heroDao.getAllHonoredHeroes()
   val favorites: Flow<List<FavoriteHeroEntity>> = heroDao.getAllFavorites()
@@ -248,6 +278,7 @@ class HeroRepository(context: Context) {
   }
 
   suspend fun createChildProfile(alias: String, ageGroup: AgeGroup, avatarId: String): String {
+    ensureParentSessionAuthenticated()
     val cleanAlias = alias.trim()
     require(cleanAlias.isNotEmpty()) { "اسم الطفل مطلوب" }
     val id = java.util.UUID.randomUUID().toString()
@@ -267,12 +298,14 @@ class HeroRepository(context: Context) {
   }
 
   suspend fun updateChildProfile(id: String, alias: String, ageGroup: AgeGroup, avatarId: String) {
+    ensureParentSessionAuthenticated()
     val cleanAlias = alias.trim()
     require(cleanAlias.isNotEmpty()) { "اسم الطفل مطلوب" }
     heroDao.updateChildProfile(id, cleanAlias, ageGroup.code, avatarId)
   }
 
   suspend fun archiveChildProfile(id: String) {
+    ensureParentSessionAuthenticated()
     heroDao.archiveChild(id)
     if (getSavedSelectedChildId() == id) {
       saveSelectedChildId(null)
@@ -300,6 +333,7 @@ class HeroRepository(context: Context) {
     assignedChildIds: List<String>,
     startDate: String = getTodayDateString()
   ): String {
+    ensureParentSessionAuthenticated()
     val cleanTitle = title.trim()
     require(cleanTitle.isNotEmpty()) { "عنوان المهمة مطلوب" }
     val taskId = java.util.UUID.randomUUID().toString()
@@ -314,7 +348,6 @@ class HeroRepository(context: Context) {
       isArchived = false,
       createdAtMillis = System.currentTimeMillis()
     )
-    heroDao.insertTask(task)
 
     val assignments = assignedChildIds.distinct().map { childId ->
       TaskAssignmentEntity(
@@ -324,9 +357,7 @@ class HeroRepository(context: Context) {
         createdAtMillis = System.currentTimeMillis()
       )
     }
-    if (assignments.isNotEmpty()) {
-      heroDao.insertAssignments(assignments)
-    }
+    heroDao.insertTaskWithAssignments(task, assignments)
     return taskId
   }
 
@@ -337,20 +368,24 @@ class HeroRepository(context: Context) {
     requiresApproval: Boolean,
     recurrenceType: RecurrenceType,
     targetDaysOfWeek: List<Int>,
-    assignedChildIds: List<String>
+    assignedChildIds: List<String>,
+    startDate: String = getTodayDateString()
   ) {
+    ensureParentSessionAuthenticated()
     val cleanTitle = title.trim()
     require(cleanTitle.isNotEmpty()) { "عنوان المهمة مطلوب" }
-    heroDao.updateTask(
-      taskId = taskId,
+    val task = ParentTaskEntity(
+      id = taskId,
       title = cleanTitle,
       description = description.trim(),
       requiresApproval = requiresApproval,
       recurrenceType = recurrenceType.code,
-      targetDaysOfWeek = targetDaysOfWeek.joinToString(",")
+      targetDaysOfWeek = targetDaysOfWeek.joinToString(","),
+      startDate = startDate,
+      isArchived = false,
+      createdAtMillis = System.currentTimeMillis()
     )
-    // Update assignments
-    heroDao.deleteAssignmentsForTask(taskId)
+
     val assignments = assignedChildIds.distinct().map { childId ->
       TaskAssignmentEntity(
         id = java.util.UUID.randomUUID().toString(),
@@ -359,12 +394,11 @@ class HeroRepository(context: Context) {
         createdAtMillis = System.currentTimeMillis()
       )
     }
-    if (assignments.isNotEmpty()) {
-      heroDao.insertAssignments(assignments)
-    }
+    heroDao.updateTaskWithAssignments(task, assignments)
   }
 
   suspend fun archiveParentTask(taskId: String) {
+    ensureParentSessionAuthenticated()
     heroDao.archiveTask(taskId)
   }
 
@@ -383,14 +417,23 @@ class HeroRepository(context: Context) {
   /**
    * Synchronizes active parent tasks assigned to [childId] into [task_occurrences] for [dateStr].
    * Guarantees that duplicate occurrences are NEVER created for the same (taskId, childId, dateStr).
+   * Relies on the occurrence/task date [dateStr] instead of device system clock to determine day of week.
    */
   suspend fun syncOccurrencesForChildAndDate(childId: String, dateStr: String = getTodayDateString()) {
     val childAssignments = heroDao.getAssignmentsForChild(childId)
     if (childAssignments.isEmpty()) return
 
-    val calendar = Calendar.getInstance()
+    val dateCalendar = Calendar.getInstance().apply {
+      try {
+        val parsed = SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(dateStr)
+        if (parsed != null) {
+          time = parsed
+        }
+      } catch (_: Exception) {
+      }
+    }
     // 1=Sunday, 2=Monday, ..., 7=Saturday
-    val currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+    val targetDayOfWeek = dateCalendar.get(Calendar.DAY_OF_WEEK)
 
     for (assignment in childAssignments) {
       val task = heroDao.getTaskById(assignment.taskId) ?: continue
@@ -399,13 +442,13 @@ class HeroRepository(context: Context) {
       // Check date start
       if (task.startDate > dateStr) continue
 
-      // Check recurrence applicability
+      // Check recurrence applicability based on task date
       val isApplicableToday = when (task.recurrenceType) {
         RecurrenceType.ONCE.code -> (task.startDate == dateStr)
         RecurrenceType.DAILY.code -> true
         RecurrenceType.CUSTOM_DAYS.code -> {
           val days = task.targetDaysOfWeek.split(",").mapNotNull { it.trim().toIntOrNull() }
-          days.contains(currentDayOfWeek)
+          days.contains(targetDayOfWeek)
         }
         else -> true
       }
@@ -453,11 +496,13 @@ class HeroRepository(context: Context) {
   }
 
   suspend fun approveTaskOccurrence(occurrenceId: String) {
+    ensureParentSessionAuthenticated()
     val now = System.currentTimeMillis()
     heroDao.reviewOccurrence(occurrenceId, TaskOccurrenceStatus.COMPLETED.code, note = null, updatedAtMillis = now)
   }
 
   suspend fun retryTaskOccurrence(occurrenceId: String, gentleNote: String?) {
+    ensureParentSessionAuthenticated()
     val now = System.currentTimeMillis()
     heroDao.reviewOccurrence(occurrenceId, TaskOccurrenceStatus.NOT_STARTED.code, note = gentleNote?.trim(), updatedAtMillis = now)
   }
@@ -495,7 +540,11 @@ class HeroRepository(context: Context) {
   }
 
   suspend fun setupInitialPin(pin: String): Boolean {
-    if (pin.length != 6 || !pin.all { it.isDigit() }) return false
+    val existing = heroDao.getParentSecurity()
+    if (existing != null && existing.isConfigured) {
+      throw IllegalStateException("لا يمكن تعيين رمز جديد لأول مرة، يوجد رمز سري تم ضبطه مسبقاً")
+    }
+    if (!SecurityUtils.isValidPinFormat(pin)) return false
     val salt = SecurityUtils.generateSalt()
     val hash = SecurityUtils.hashPin(pin, salt)
     val entity = ParentSecurityEntity(
@@ -505,9 +554,13 @@ class HeroRepository(context: Context) {
       failedAttempts = 0,
       lockoutUntilMillis = 0L,
       isConfigured = true,
+      algoVersion = SecurityUtils.DEFAULT_ALGO_VERSION,
+      iterations = SecurityUtils.DEFAULT_ITERATIONS,
+      algorithm = SecurityUtils.DEFAULT_ALGORITHM,
       updatedAtMillis = System.currentTimeMillis()
     )
     heroDao.insertOrUpdateParentSecurity(entity)
+    isParentSessionAuthenticated = true
     return true
   }
 
@@ -521,12 +574,19 @@ class HeroRepository(context: Context) {
       return PinCheckResult.LockedOut(remainingSeconds)
     }
 
-    val isValid = SecurityUtils.verifyPin(enteredPin, sec.pinSalt, sec.pinHash)
+    val isValid = SecurityUtils.verifyPin(
+      enteredPin = enteredPin,
+      saltBase64 = sec.pinSalt,
+      expectedHash = sec.pinHash,
+      algorithm = sec.algorithm,
+      iterations = sec.iterations
+    )
     if (isValid) {
       // Reset failed attempts on success
       heroDao.insertOrUpdateParentSecurity(
         sec.copy(failedAttempts = 0, lockoutUntilMillis = 0L, updatedAtMillis = now)
       )
+      isParentSessionAuthenticated = true
       return PinCheckResult.Success
     } else {
       val newFailedAttempts = sec.failedAttempts + 1
@@ -545,13 +605,51 @@ class HeroRepository(context: Context) {
   }
 
   suspend fun changePin(currentPin: String, newPin: String): Boolean {
+    ensureParentSessionAuthenticated()
     val verify = verifyPin(currentPin)
     if (verify !is PinCheckResult.Success) return false
-    return setupInitialPin(newPin)
+    if (!SecurityUtils.isValidPinFormat(newPin)) return false
+    val salt = SecurityUtils.generateSalt()
+    val hash = SecurityUtils.hashPin(newPin, salt)
+    val entity = ParentSecurityEntity(
+      id = 1,
+      pinSalt = salt,
+      pinHash = hash,
+      failedAttempts = 0,
+      lockoutUntilMillis = 0L,
+      isConfigured = true,
+      algoVersion = SecurityUtils.DEFAULT_ALGO_VERSION,
+      iterations = SecurityUtils.DEFAULT_ITERATIONS,
+      algorithm = SecurityUtils.DEFAULT_ALGORITHM,
+      updatedAtMillis = System.currentTimeMillis()
+    )
+    heroDao.insertOrUpdateParentSecurity(entity)
+    isParentSessionAuthenticated = true
+    return true
   }
 
-  suspend fun resetPinWithDeviceAuth(newPin: String): Boolean {
-    return setupInitialPin(newPin)
+  suspend fun resetPinWithDeviceAuth(newPin: String, isDeviceAuthConfirmed: Boolean): Boolean {
+    if (!isDeviceAuthConfirmed) {
+      throw SecurityException("إعادة ضبط الرمز تتطلب نجاح مصادقة أمان الجهاز")
+    }
+    if (!SecurityUtils.isValidPinFormat(newPin)) return false
+    val salt = SecurityUtils.generateSalt()
+    val hash = SecurityUtils.hashPin(newPin, salt)
+    val entity = ParentSecurityEntity(
+      id = 1,
+      pinSalt = salt,
+      pinHash = hash,
+      failedAttempts = 0,
+      lockoutUntilMillis = 0L,
+      isConfigured = true,
+      algoVersion = SecurityUtils.DEFAULT_ALGO_VERSION,
+      iterations = SecurityUtils.DEFAULT_ITERATIONS,
+      algorithm = SecurityUtils.DEFAULT_ALGORITHM,
+      updatedAtMillis = System.currentTimeMillis()
+    )
+    heroDao.insertOrUpdateParentSecurity(entity)
+    isParentSessionAuthenticated = true
+    return true
   }
 }
 

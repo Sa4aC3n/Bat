@@ -18,7 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     TaskOccurrenceEntity::class,
     ParentSecurityEntity::class
   ],
-  version = 2,
+  version = 3,
   exportSchema = false
 )
 abstract class HeroDatabase : RoomDatabase() {
@@ -108,6 +108,21 @@ abstract class HeroDatabase : RoomDatabase() {
       }
     }
 
+    val MIGRATION_2_3 = object : Migration(2, 3) {
+      override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `parent_security` ADD COLUMN `algoVersion` INTEGER NOT NULL DEFAULT 1")
+        db.execSQL("ALTER TABLE `parent_security` ADD COLUMN `iterations` INTEGER NOT NULL DEFAULT 10000")
+        db.execSQL("ALTER TABLE `parent_security` ADD COLUMN `algorithm` TEXT NOT NULL DEFAULT 'PBKDF2WithHmacSHA256'")
+      }
+    }
+
+    val MIGRATION_1_3 = object : Migration(1, 3) {
+      override fun migrate(db: SupportSQLiteDatabase) {
+        MIGRATION_1_2.migrate(db)
+        MIGRATION_2_3.migrate(db)
+      }
+    }
+
     fun getDatabase(context: Context): HeroDatabase {
       return INSTANCE ?: synchronized(this) {
         val instance = Room.databaseBuilder(
@@ -115,7 +130,7 @@ abstract class HeroDatabase : RoomDatabase() {
           HeroDatabase::class.java,
           "hero_of_the_day_database"
         )
-          .addMigrations(MIGRATION_1_2)
+          .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_1_3)
           .build()
         INSTANCE = instance
         instance

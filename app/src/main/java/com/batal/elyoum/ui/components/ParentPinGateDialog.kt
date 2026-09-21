@@ -1,7 +1,10 @@
 package com.batal.elyoum.ui.components
 
+import android.app.Activity
 import android.app.KeyguardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -69,6 +72,7 @@ fun ParentPinGateDialog(
   val coroutineScope = rememberCoroutineScope()
 
   var isConfigured by remember { mutableStateOf<Boolean?>(null) }
+  var isDeviceAuthConfirmedForReset by remember { mutableStateOf(false) }
   var setupStep by remember { mutableIntStateOf(1) } // 1: Enter new PIN, 2: Confirm new PIN
   var initialPinAttempt by remember { mutableStateOf("") }
   var enteredPin by remember { mutableStateOf("") }
@@ -98,6 +102,21 @@ fun ParentPinGateDialog(
     keyguardManager?.isDeviceSecure ?: false
   }
 
+  val deviceAuthLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.StartActivityForResult()
+  ) { result ->
+    if (result.resultCode == Activity.RESULT_OK) {
+      isDeviceAuthConfirmedForReset = true
+      showResetDialog = false
+      setupStep = 1
+      enteredPin = ""
+      initialPinAttempt = ""
+      errorMessage = null
+    } else {
+      errorMessage = "فشلت مصادقة أمان الجهاز. لم يتم تغيير الرمز."
+    }
+  }
+
   fun onKeyClick(digit: String) {
     if (isLockedOut) return
     if (enteredPin.length < 6) {
@@ -105,8 +124,9 @@ fun ParentPinGateDialog(
       errorMessage = null
       if (enteredPin.length == 6) {
         val pin = enteredPin
-        if (isConfigured == false) {
-          // Setup flow
+        val inSetupOrReset = (isConfigured == false) || isDeviceAuthConfirmedForReset
+        if (inSetupOrReset) {
+          // Setup or authenticated reset flow
           if (setupStep == 1) {
             initialPinAttempt = pin
             enteredPin = ""
@@ -114,7 +134,11 @@ fun ParentPinGateDialog(
           } else {
             if (pin == initialPinAttempt) {
               coroutineScope.launch {
-                val ok = viewModel.setupInitialPin(pin)
+                val ok = if (isDeviceAuthConfirmedForReset) {
+                  viewModel.resetPinWithDeviceAuth(pin, isDeviceAuthConfirmed = true)
+                } else {
+                  viewModel.setupInitialPin(pin)
+                }
                 if (ok) {
                   onSuccess()
                 } else {
@@ -192,6 +216,8 @@ fun ParentPinGateDialog(
         Spacer(modifier = Modifier.width(8.dp))
         Text(
           text = when {
+            isDeviceAuthConfirmedForReset && setupStep == 1 -> "إعادة تعيين رمز الدخول (٦ أرقام)"
+            isDeviceAuthConfirmedForReset && setupStep == 2 -> "تأكيد الرمز الجديد (٦ أرقام)"
             isConfigured == false && setupStep == 1 -> "تعيين رمز دخول للأهل (٦ أرقام)"
             isConfigured == false && setupStep == 2 -> "تأكيد رمز الدخول (٦ أرقام)"
             else -> "بوابة ولي الأمر"
@@ -209,6 +235,8 @@ fun ParentPinGateDialog(
       ) {
         Text(
           text = when {
+            isDeviceAuthConfirmedForReset && setupStep == 1 -> "تم التحقق من أمان الجهاز بنجاح. أدخل الرمز الجديد المكون من ٦ أرقام."
+            isDeviceAuthConfirmedForReset && setupStep == 2 -> "أعد كتابة الرمز الجديد للتأكيد."
             isConfigured == false && setupStep == 1 -> "قم بتعيين رمز سري من ٦ أرقام لحماية إعدادات الأطفال والمهام والاعتمادات."
             isConfigured == false && setupStep == 2 -> "أعد كتابة الرمز نفسه للتأكيد."
             else -> "أدخل رمز المرور المكون من ٦ أرقام للمتابعة إلى قسم الوالدين."
@@ -349,7 +377,7 @@ fun ParentPinGateDialog(
     }
   )
 
-  // Reset dialog via device lock explanation
+  // Reset dialog via device lock authentication
   if (showResetDialog) {
     AlertDialog(
       onDismissRequest = { showResetDialog = false },
@@ -358,24 +386,36 @@ fun ParentPinGateDialog(
       },
       text = {
         Column {
-          Text(
-            text = "للحفاظ على خصوصية الأسرة وعدم فقدان إنجازات أطفالك، لا يتم تخزين الرمز على الإنترنت. يمكنك تعيين رمز جديد مباشرة دون مسح بيانات أبطالك الصغار.",
-            style = MaterialTheme.typography.bodyMedium
-          )
+          if (hasDeviceSecurity) {
+            Text(
+              text = "لحماية خصوصية الأسرة وعدم السماح بتجاوز الرمز دون إذن، تتطلب استعادة الرمز تأكيد قفل شاشة الجهاز (البصمة، النمط، أو رمز المرور).",
+              style = MaterialTheme.typography.bodyMedium
+            )
+          } else {
+            Text(
+              text = "لا يوجد قفل شاشة مفعل على هذا الجهاز. لحماية إعدادات الأسرة، يرجى تفعيل قفل الشاشة أو البصمة في إعدادات الهاتف لتتمكن من إعادة تعيين الرمز بأمان.",
+              style = MaterialTheme.typography.bodyMedium,
+              color = MaterialTheme.colorScheme.error
+            )
+          }
         }
       },
       confirmButton = {
-        Button(
-          onClick = {
-            showResetDialog = false
-            isConfigured = false
-            setupStep = 1
-            enteredPin = ""
-            errorMessage = null
-          },
-          colors = ButtonDefaults.buttonColors(containerColor = HeroGoldDark)
-        ) {
-          Text("تعيين رمز جديد")
+        if (hasDeviceSecurity) {
+          Button(
+            onClick = {
+              val intent = keyguardManager?.createConfirmDeviceCredentialIntent(
+                "مصادقة ولي الأمر",
+                "يرجى تأكيد أمان الجهاز لإعادة تعيين رمز الدخول"
+              )
+              if (intent != null) {
+                deviceAuthLauncher.launch(intent)
+              }
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = HeroGoldDark)
+          ) {
+            Text("متابعة المصادقة")
+          }
         }
       },
       dismissButton = {

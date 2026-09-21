@@ -16,6 +16,49 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
+// Web Crypto PBKDF2 derivation with random salt
+async function derivePinHash(pin: string, saltBase64: string, iterations = 10000): Promise<string> {
+  const enc = new TextEncoder();
+  const pinKey = await window.crypto.subtle.importKey(
+    'raw',
+    enc.encode(pin),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits']
+  );
+  const binaryString = atob(saltBase64);
+  const salt = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    salt[i] = binaryString.charCodeAt(i);
+  }
+  const derivedBits = await window.crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt,
+      iterations,
+      hash: 'SHA-256'
+    },
+    pinKey,
+    256
+  );
+  const hashArray = new Uint8Array(derivedBits);
+  let binary = '';
+  for (let i = 0; i < hashArray.length; i++) {
+    binary += String.fromCharCode(hashArray[i]);
+  }
+  return btoa(binary);
+}
+
+function generateRandomSalt(): string {
+  const salt = new Uint8Array(16);
+  window.crypto.getRandomValues(salt);
+  let binary = '';
+  for (let i = 0; i < salt.length; i++) {
+    binary += String.fromCharCode(salt[i]);
+  }
+  return btoa(binary);
+}
+
 export interface WebChild {
   id: string;
   alias: string;
@@ -31,6 +74,7 @@ export interface WebParentTask {
   requiresApproval: boolean;
   recurrence: 'daily' | 'weekly' | 'once';
   assignedChildIds: string[];
+  startDate: string;
   isArchived: boolean;
 }
 
@@ -79,13 +123,75 @@ export default function ParentsSectionModal({
 }: ParentsSectionModalProps) {
   // PIN state
   const [pinConfigured, setPinConfigured] = useState<boolean>(() => {
-    return !!localStorage.getItem('hero_parent_pin');
+    return !!(localStorage.getItem('hero_parent_pin_hash') || localStorage.getItem('hero_parent_pin'));
   });
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [setupStep, setSetupStep] = useState<1 | 2>(1);
   const [firstAttemptPin, setFirstAttemptPin] = useState('');
   const [pinError, setPinError] = useState('');
+  const [lockoutRemainingSec, setLockoutRemainingSec] = useState<number>(() => {
+    const until = parseInt(localStorage.getItem('hero_parent_lockout_until') || '0', 10);
+    const diff = Math.ceil((until - Date.now()) / 1000);
+    return diff > 0 ? diff : 0;
+  });
+
+  // Auto-lock parent session when app/tab is backgrounded or left
+  useEffect(() => {
+    const handleLock = () => {
+      setIsUnlocked(false);
+      setPinInput('');
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        handleLock();
+      }
+    };
+    window.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleLock);
+    window.addEventListener('beforeunload', handleLock);
+    return () => {
+      window.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleLock);
+      window.removeEventListener('beforeunload', handleLock);
+    };
+  }, []);
+
+  // Transparently migrate legacy plaintext PIN if exists
+  useEffect(() => {
+    const legacyPin = localStorage.getItem('hero_parent_pin');
+    if (legacyPin && /^\d{6}$/.test(legacyPin)) {
+      (async () => {
+        try {
+          const salt = generateRandomSalt();
+          const hash = await derivePinHash(legacyPin, salt, 10000);
+          localStorage.setItem('hero_parent_pin_salt', salt);
+          localStorage.setItem('hero_parent_pin_hash', hash);
+          localStorage.setItem('hero_parent_pin_algo', 'PBKDF2WithHmacSHA256');
+          localStorage.setItem('hero_parent_pin_iterations', '10000');
+          localStorage.removeItem('hero_parent_pin'); // safely delete plaintext
+          setPinConfigured(true);
+        } catch (e) {
+          console.error('Error migrating legacy PIN:', e);
+        }
+      })();
+    }
+  }, []);
+
+  // Lockout countdown timer
+  useEffect(() => {
+    if (lockoutRemainingSec <= 0) return;
+    const timer = setInterval(() => {
+      setLockoutRemainingSec(prev => {
+        if (prev <= 1) {
+          localStorage.removeItem('hero_parent_lockout_until');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lockoutRemainingSec]);
 
   // Tabs in parents section
   const [activeSubTab, setActiveSubTab] = useState<'children' | 'tasks' | 'approvals' | 'security'>('children');
@@ -101,6 +207,7 @@ export default function ParentsSectionModal({
   const [taskDesc, setTaskDesc] = useState('');
   const [taskReqApproval, setTaskReqApproval] = useState(true);
   const [taskRecurrence, setTaskRecurrence] = useState<'daily' | 'weekly' | 'once'>('daily');
+  const [taskStartDate, setTaskStartDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [selectedKidsForTask, setSelectedKidsForTask] = useState<string[]>([]);
 
   // Retry feedback modal
@@ -116,7 +223,8 @@ export default function ParentsSectionModal({
   if (!isOpen) return null;
 
   // Handle PIN keypad / typing
-  const handlePinDigit = (digit: string) => {
+  const handlePinDigit = async (digit: string) => {
+    if (lockoutRemainingSec > 0) return;
     if (pinInput.length < 6) {
       const next = pinInput + digit;
       setPinInput(next);
@@ -130,10 +238,21 @@ export default function ParentsSectionModal({
             setSetupStep(2);
           } else {
             if (next === firstAttemptPin) {
-              localStorage.setItem('hero_parent_pin', next);
-              setPinConfigured(true);
-              setIsUnlocked(true);
-              setPinInput('');
+              try {
+                const salt = generateRandomSalt();
+                const hash = await derivePinHash(next, salt, 10000);
+                localStorage.setItem('hero_parent_pin_salt', salt);
+                localStorage.setItem('hero_parent_pin_hash', hash);
+                localStorage.setItem('hero_parent_pin_algo', 'PBKDF2WithHmacSHA256');
+                localStorage.setItem('hero_parent_pin_iterations', '10000');
+                localStorage.removeItem('hero_parent_pin');
+                setPinConfigured(true);
+                setIsUnlocked(true);
+                setPinInput('');
+              } catch (e) {
+                setPinError('حدث خطأ أثناء تشفير الرمز');
+                setPinInput('');
+              }
             } else {
               setPinError('الرمزان غير متطابقين. يرجى البدء من جديد.');
               setSetupStep(1);
@@ -141,12 +260,53 @@ export default function ParentsSectionModal({
             }
           }
         } else {
-          const savedPin = localStorage.getItem('hero_parent_pin') || '123456';
-          if (next === savedPin) {
+          // Check lockout
+          const lockoutUntil = parseInt(localStorage.getItem('hero_parent_lockout_until') || '0', 10);
+          const now = Date.now();
+          if (lockoutUntil > now) {
+            const sec = Math.ceil((lockoutUntil - now) / 1000);
+            setLockoutRemainingSec(sec);
+            setPinError(`تم قفل المحاولات مؤقتًا. يرجى الانتظار ${sec} ثانية.`);
+            setPinInput('');
+            return;
+          }
+
+          const salt = localStorage.getItem('hero_parent_pin_salt');
+          const savedHash = localStorage.getItem('hero_parent_pin_hash');
+          let isMatch = false;
+
+          if (salt && savedHash) {
+            try {
+              const computed = await derivePinHash(next, salt, 10000);
+              isMatch = computed === savedHash;
+            } catch (e) {
+              isMatch = false;
+            }
+          }
+
+          if (isMatch) {
+            localStorage.removeItem('hero_parent_failed_attempts');
+            localStorage.removeItem('hero_parent_lockout_until');
+            setLockoutRemainingSec(0);
             setIsUnlocked(true);
             setPinInput('');
           } else {
-            setPinError('رمز غير صحيح! حاول مجددًا');
+            const failed = parseInt(localStorage.getItem('hero_parent_failed_attempts') || '0', 10) + 1;
+            localStorage.setItem('hero_parent_failed_attempts', failed.toString());
+            let lockoutMs = 0;
+            if (failed === 4) lockoutMs = 30000;
+            else if (failed === 5) lockoutMs = 60000;
+            else if (failed >= 6) lockoutMs = 300000;
+
+            if (lockoutMs > 0) {
+              const until = now + lockoutMs;
+              localStorage.setItem('hero_parent_lockout_until', until.toString());
+              const sec = Math.ceil(lockoutMs / 1000);
+              setLockoutRemainingSec(sec);
+              setPinError(`رمز غير صحيح! تم قفل المحاولات لمدة ${sec} ثانية.`);
+            } else {
+              setPinError(`رمز غير صحيح! (محاولة ${failed} من 4 قبل القفل المؤقت)`);
+            }
             setPinInput('');
           }
         }
@@ -155,6 +315,7 @@ export default function ParentsSectionModal({
   };
 
   const handleDeleteDigit = () => {
+    if (lockoutRemainingSec > 0) return;
     setPinInput(prev => prev.slice(0, -1));
     setPinError('');
   };
@@ -186,6 +347,7 @@ export default function ParentsSectionModal({
       requiresApproval: taskReqApproval,
       recurrence: taskRecurrence,
       assignedChildIds: selectedKidsForTask,
+      startDate: taskStartDate,
       isArchived: false
     };
     setParentTasks(prev => [...prev, newTask]);
@@ -657,6 +819,18 @@ export default function ParentsSectionModal({
             </div>
             <div className="flex items-center justify-between p-3 rounded-xl bg-slate-800 border border-slate-700">
               <div>
+                <p className="text-xs font-bold text-slate-200">تاريخ بدء المهمة</p>
+                <p className="text-[11px] text-slate-400">تاريخ بدء ظهور المهمة للطفل</p>
+              </div>
+              <input
+                type="date"
+                value={taskStartDate}
+                onChange={e => setTaskStartDate(e.target.value)}
+                className="px-2 py-1 text-xs rounded-lg bg-slate-900 border border-slate-700 text-slate-200 outline-none focus:border-amber-400"
+              />
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-xl bg-slate-800 border border-slate-700">
+              <div>
                 <p className="text-xs font-bold text-slate-200">تتطلب موافقة الوالدين</p>
                 <p className="text-[11px] text-slate-400">لا تُعتبر مكتملة حتى يؤكدها ولي الأمر</p>
               </div>
@@ -772,19 +946,43 @@ export default function ParentsSectionModal({
             />
             <div className="flex items-center gap-2 pt-2">
               <button
-                onClick={() => {
-                  const saved = localStorage.getItem('hero_parent_pin') || '123456';
-                  if (currPin !== saved) {
-                    alert('الرمز الحالي غير صحيح');
+                onClick={async () => {
+                  const salt = localStorage.getItem('hero_parent_pin_salt');
+                  const savedHash = localStorage.getItem('hero_parent_pin_hash');
+                  if (!salt || !savedHash) {
+                    alert('لا يوجد رمز محفوظ للتحقق منه');
                     return;
                   }
-                  if (newPin.length !== 6 || newPin !== confirmNewPin) {
-                    alert('الرمز الجديد غير صالح أو غير متطابق');
+                  try {
+                    const enteredHash = await derivePinHash(currPin, salt, 10000);
+                    if (enteredHash !== savedHash) {
+                      alert('الرمز الحالي غير صحيح');
+                      return;
+                    }
+                  } catch (e) {
+                    alert('فشل التحقق من الرمز الحالي');
                     return;
                   }
-                  localStorage.setItem('hero_parent_pin', newPin);
-                  alert('تم تغيير الرمز بنجاح!');
-                  setShowChangePin(false);
+                  if (newPin.length !== 6 || !/^\d{6}$/.test(newPin) || newPin !== confirmNewPin) {
+                    alert('الرمز الجديد غير صالح (يجب أن يتكون من ٦ أرقام متطابقة)');
+                    return;
+                  }
+                  try {
+                    const newSalt = generateRandomSalt();
+                    const newHash = await derivePinHash(newPin, newSalt, 10000);
+                    localStorage.setItem('hero_parent_pin_salt', newSalt);
+                    localStorage.setItem('hero_parent_pin_hash', newHash);
+                    localStorage.setItem('hero_parent_pin_algo', 'PBKDF2WithHmacSHA256');
+                    localStorage.setItem('hero_parent_pin_iterations', '10000');
+                    localStorage.removeItem('hero_parent_pin'); // Purge legacy plaintext
+                    alert('تم تغيير الرمز بنجاح وتأمينه!');
+                    setShowChangePin(false);
+                    setCurrPin('');
+                    setNewPin('');
+                    setConfirmNewPin('');
+                  } catch (e) {
+                    alert('حدث خطأ أثناء حفظ الرمز الجديد');
+                  }
                 }}
                 className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition"
               >

@@ -383,6 +383,7 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
     recurrenceType: RecurrenceType,
     targetDaysOfWeek: List<Int>,
     assignedChildIds: List<String>,
+    startDate: String = repository.getTodayDateString(),
     onComplete: () -> Unit = {}
   ) {
     viewModelScope.launch {
@@ -392,7 +393,8 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
         requiresApproval = requiresApproval,
         recurrenceType = recurrenceType,
         targetDaysOfWeek = targetDaysOfWeek,
-        assignedChildIds = assignedChildIds
+        assignedChildIds = assignedChildIds,
+        startDate = startDate
       )
       selectedChild.value?.let { child ->
         if (assignedChildIds.contains(child.id)) {
@@ -411,6 +413,7 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
     recurrenceType: RecurrenceType,
     targetDaysOfWeek: List<Int>,
     assignedChildIds: List<String>,
+    startDate: String = repository.getTodayDateString(),
     onComplete: () -> Unit = {}
   ) {
     viewModelScope.launch {
@@ -421,7 +424,8 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
         requiresApproval = requiresApproval,
         recurrenceType = recurrenceType,
         targetDaysOfWeek = targetDaysOfWeek,
-        assignedChildIds = assignedChildIds
+        assignedChildIds = assignedChildIds,
+        startDate = startDate
       )
       selectedChild.value?.let { child ->
         repository.syncOccurrencesForChildAndDate(child.id, repository.getTodayDateString())
@@ -448,12 +452,17 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
   private val _isParentSessionUnlocked = MutableStateFlow(false)
   val isParentSessionUnlocked: StateFlow<Boolean> = _isParentSessionUnlocked.asStateFlow()
 
-  fun unlockParentSession() {
-    _isParentSessionUnlocked.value = true
+  suspend fun unlockParentSessionWithDeviceAuth(isDeviceAuthConfirmed: Boolean): Boolean {
+    val success = repository.unlockWithDeviceAuth(isDeviceAuthConfirmed)
+    if (success) {
+      _isParentSessionUnlocked.value = true
+    }
+    return success
   }
 
   fun lockParentSession() {
     _isParentSessionUnlocked.value = false
+    repository.lockParentSession()
   }
 
   suspend fun isPinConfigured(): Boolean {
@@ -480,8 +489,8 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
     return repository.changePin(currentPin, newPin)
   }
 
-  suspend fun resetPinWithDeviceAuth(newPin: String): Boolean {
-    val success = repository.resetPinWithDeviceAuth(newPin)
+  suspend fun resetPinWithDeviceAuth(newPin: String, isDeviceAuthConfirmed: Boolean): Boolean {
+    val success = repository.resetPinWithDeviceAuth(newPin, isDeviceAuthConfirmed)
     if (success) {
       _isParentSessionUnlocked.value = true
     }

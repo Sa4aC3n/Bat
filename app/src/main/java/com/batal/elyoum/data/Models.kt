@@ -180,6 +180,9 @@ data class ParentSecurityEntity(
   val failedAttempts: Int = 0,
   val lockoutUntilMillis: Long = 0L,
   val isConfigured: Boolean = false,
+  val algoVersion: Int = 1,
+  val iterations: Int = 10000,
+  val algorithm: String = "PBKDF2WithHmacSHA256",
   val updatedAtMillis: Long = System.currentTimeMillis()
 )
 
