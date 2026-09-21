@@ -26,13 +26,74 @@ import {
   Eye,
   ShieldAlert,
   Heart,
-  ChevronLeft
+  ChevronLeft,
+  Lock,
+  User,
+  Undo2,
+  Hourglass
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { HEROES, DEFAULT_DEEDS, QUIZ_QUESTIONS, Hero, HonoredHero } from './data/heroes';
+import ParentsSectionModal, { WebChild, WebParentTask, WebTaskOccurrence } from './ParentsSectionModal';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'today' | 'challenge' | 'honor' | 'archive'>('today');
+
+  // Parents section & children in localStorage
+  const [showParentsModal, setShowParentsModal] = useState(false);
+  const [effortPraise, setEffortPraise] = useState<string | null>(null);
+
+  const [childrenList, setChildrenList] = useState<WebChild[]>(() => {
+    try {
+      const saved = localStorage.getItem('hero_children_list');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [selectedChildId, setSelectedChildId] = useState<string>(() => {
+    return localStorage.getItem('hero_selected_child_id') || '';
+  });
+
+  const [parentTasks, setParentTasks] = useState<WebParentTask[]>(() => {
+    try {
+      const saved = localStorage.getItem('hero_parent_tasks');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [taskOccurrences, setTaskOccurrences] = useState<WebTaskOccurrence[]>(() => {
+    try {
+      const saved = localStorage.getItem('hero_task_occurrences');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem('hero_children_list', JSON.stringify(childrenList));
+    if (!selectedChildId && childrenList.length > 0) {
+      setSelectedChildId(childrenList[0].id);
+    }
+  }, [childrenList, selectedChildId]);
+
+  useEffect(() => {
+    if (selectedChildId) {
+      localStorage.setItem('hero_selected_child_id', selectedChildId);
+    }
+  }, [selectedChildId]);
+
+  useEffect(() => {
+    localStorage.setItem('hero_parent_tasks', JSON.stringify(parentTasks));
+  }, [parentTasks]);
+
+  useEffect(() => {
+    localStorage.setItem('hero_task_occurrences', JSON.stringify(taskOccurrences));
+  }, [taskOccurrences]);
   
   // Day of year calculation for Today's Hero
   const now = new Date();
@@ -300,6 +361,15 @@ export default function App() {
 
           <div className="flex items-center gap-2">
             <button
+              onClick={() => setShowParentsModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-bold transition border border-amber-500/30"
+              title="قسم الوالدين"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>للأهل</span>
+            </button>
+
+            <button
               onClick={() => {
                 const otherHeroes = HEROES.filter(h => h.id !== selectedHero.id);
                 const random = otherHeroes[Math.floor(Math.random() * otherHeroes.length)];
@@ -491,6 +561,142 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* Effort praise notification banner */}
+            {effortPraise && (
+              <div className="p-4 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-between text-amber-300 animate-fadeIn">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span className="text-xs sm:text-sm font-bold">{effortPraise}</span>
+                </div>
+                <button onClick={() => setEffortPraise(null)} className="text-xs text-amber-400 hover:text-amber-200">
+                  إغلاق
+                </button>
+              </div>
+            )}
+
+            {/* Child Selector if children exist */}
+            {childrenList.filter(c => !c.isArchived).length > 0 && (
+              <div className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700/80 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                    <User className="w-4 h-4 text-amber-400" />
+                    اختيار البطل لمتابعة مهامه المخصصة:
+                  </span>
+                  <button 
+                    onClick={() => setShowParentsModal(true)}
+                    className="text-xs text-amber-400 hover:underline font-medium"
+                  >
+                    إدارة من قسم الأهل
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {childrenList.filter(c => !c.isArchived).map(child => {
+                    const isSelected = child.id === selectedChildId;
+                    return (
+                      <button
+                        key={child.id}
+                        onClick={() => setSelectedChildId(child.id)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 whitespace-nowrap ${
+                          isSelected 
+                            ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20' 
+                            : 'bg-slate-700/60 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        <span>★</span>
+                        <span>{child.alias}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Parent Assigned Tasks for Selected Child */}
+            {selectedChildId && (
+              (() => {
+                const todayStr = now.toISOString().split('T')[0];
+                const activeOccs = taskOccurrences.filter(o => o.childId === selectedChildId && o.dateStr === todayStr);
+                const selectedChild = childrenList.find(c => c.id === selectedChildId);
+                if (activeOccs.length === 0) return null;
+                return (
+                  <div className="space-y-3">
+                    <h3 className="text-sm font-bold text-amber-400 flex items-center gap-2 px-1">
+                      <Sparkles className="w-4 h-4" />
+                      مهام الوالدين المخصصة لـ {selectedChild?.alias || 'البطل'}:
+                    </h3>
+                    {activeOccs.map(occ => {
+                      return (
+                        <div key={occ.id} className="p-4 rounded-2xl bg-slate-800/90 border border-amber-500/30 space-y-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <h4 className="font-bold text-sm text-slate-100">{occ.snapshotTitle}</h4>
+                              {occ.snapshotDescription && (
+                                <p className="text-xs text-slate-400 mt-0.5">{occ.snapshotDescription}</p>
+                              )}
+                            </div>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 shrink-0">
+                              {occ.status === 'COMPLETED' ? 'مكتملة ✓' : occ.status === 'PENDING_APPROVAL' ? 'بانتظار التأكيد' : occ.status === 'SKIPPED' ? 'تم تخطيها' : 'مطلوبة'}
+                            </span>
+                          </div>
+
+                          {occ.parentFeedbackNote && (
+                            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300">
+                              💬 ملاحظة الوالدين: {occ.parentFeedbackNote}
+                            </div>
+                          )}
+
+                          {occ.status === 'NOT_STARTED' && (
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                onClick={() => {
+                                  if (occ.requiresApproval) {
+                                    setTaskOccurrences(prev => prev.map(o => o.id === occ.id ? { ...o, status: 'PENDING_APPROVAL' } : o));
+                                  } else {
+                                    setTaskOccurrences(prev => prev.map(o => o.id === occ.id ? { ...o, status: 'COMPLETED' } : o));
+                                    setEffortPraise('محاولة رائعة! كل خطوة تصنع منك بطلاً حقيقيًا!');
+                                    confetti({ particleCount: 35, spread: 50, origin: { y: 0.6 } });
+                                  }
+                                }}
+                                className="flex-1 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                              >
+                                <Check className="w-4 h-4 stroke-[3]" />
+                                <span>أنجزتها!</span>
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setTaskOccurrences(prev => prev.map(o => o.id === occ.id ? { ...o, status: 'SKIPPED' } : o));
+                                }}
+                                className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-650 text-slate-300 font-bold text-xs transition"
+                              >
+                                هعدّيها النهارده
+                              </button>
+                            </div>
+                          )}
+
+                          {occ.status === 'PENDING_APPROVAL' && (
+                            <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900 border border-amber-500/20">
+                              <span className="text-xs text-amber-300 flex items-center gap-1.5 font-medium">
+                                <Hourglass className="w-4 h-4 text-amber-400" />
+                                بانتظار مراجعة وتأكيد ولي الأمر...
+                              </span>
+                              <button
+                                onClick={() => {
+                                  setTaskOccurrences(prev => prev.map(o => o.id === occ.id ? { ...o, status: 'NOT_STARTED' } : o));
+                                }}
+                                className="text-xs text-slate-400 hover:text-slate-200 underline"
+                              >
+                                تراجع
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()
+            )}
 
             {/* Checklist */}
             <div className="space-y-3">
@@ -879,6 +1085,19 @@ export default function App() {
           {copiedNotification}
         </div>
       )}
+
+      {/* Parents Section Modal */}
+      <ParentsSectionModal
+        isOpen={showParentsModal}
+        onClose={() => setShowParentsModal(false)}
+        childrenList={childrenList}
+        setChildrenList={setChildrenList}
+        parentTasks={parentTasks}
+        setParentTasks={setParentTasks}
+        occurrences={taskOccurrences}
+        setOccurrences={setTaskOccurrences}
+        onPraise={(msg) => setEffortPraise(msg)}
+      />
 
       {/* Bottom Navigation Bar */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-lg border-t border-slate-800 px-4 py-2">

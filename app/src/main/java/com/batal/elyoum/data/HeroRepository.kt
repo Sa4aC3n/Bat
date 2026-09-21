@@ -228,4 +228,330 @@ class HeroRepository(context: Context) {
       heroDao.deleteFavorite(heroId)
     }
   }
+
+  // ==========================================
+  // --- Child Profiles & Preferences ---
+  // ==========================================
+
+  private val sharedPrefs = context.getSharedPreferences("batal_prefs", Context.MODE_PRIVATE)
+  private val KEY_SELECTED_CHILD_ID = "selected_child_id"
+
+  val activeChildren: Flow<List<ChildProfileEntity>> = heroDao.getActiveChildren()
+  val allChildren: Flow<List<ChildProfileEntity>> = heroDao.getAllChildren()
+
+  fun getSavedSelectedChildId(): String? {
+    return sharedPrefs.getString(KEY_SELECTED_CHILD_ID, null)
+  }
+
+  fun saveSelectedChildId(childId: String?) {
+    sharedPrefs.edit().putString(KEY_SELECTED_CHILD_ID, childId).apply()
+  }
+
+  suspend fun createChildProfile(alias: String, ageGroup: AgeGroup, avatarId: String): String {
+    val cleanAlias = alias.trim()
+    require(cleanAlias.isNotEmpty()) { "اسم الطفل مطلوب" }
+    val id = java.util.UUID.randomUUID().toString()
+    val child = ChildProfileEntity(
+      id = id,
+      alias = cleanAlias,
+      ageGroup = ageGroup.code,
+      avatarId = avatarId,
+      createdAtMillis = System.currentTimeMillis(),
+      isArchived = false
+    )
+    heroDao.insertChild(child)
+    if (getSavedSelectedChildId() == null) {
+      saveSelectedChildId(id)
+    }
+    return id
+  }
+
+  suspend fun updateChildProfile(id: String, alias: String, ageGroup: AgeGroup, avatarId: String) {
+    val cleanAlias = alias.trim()
+    require(cleanAlias.isNotEmpty()) { "اسم الطفل مطلوب" }
+    heroDao.updateChildProfile(id, cleanAlias, ageGroup.code, avatarId)
+  }
+
+  suspend fun archiveChildProfile(id: String) {
+    heroDao.archiveChild(id)
+    if (getSavedSelectedChildId() == id) {
+      saveSelectedChildId(null)
+    }
+  }
+
+  suspend fun getChildById(id: String): ChildProfileEntity? {
+    return heroDao.getChildById(id)
+  }
+
+  // ==========================================
+  // --- Parent Tasks & Scheduling ---
+  // ==========================================
+
+  val activeTasks: Flow<List<ParentTaskEntity>> = heroDao.getActiveTasks()
+  val allTasks: Flow<List<ParentTaskEntity>> = heroDao.getAllTasks()
+  val pendingApprovalOccurrences: Flow<List<TaskOccurrenceEntity>> = heroDao.getPendingApprovalOccurrences()
+
+  suspend fun createParentTask(
+    title: String,
+    description: String,
+    requiresApproval: Boolean,
+    recurrenceType: RecurrenceType,
+    targetDaysOfWeek: List<Int>,
+    assignedChildIds: List<String>,
+    startDate: String = getTodayDateString()
+  ): String {
+    val cleanTitle = title.trim()
+    require(cleanTitle.isNotEmpty()) { "عنوان المهمة مطلوب" }
+    val taskId = java.util.UUID.randomUUID().toString()
+    val task = ParentTaskEntity(
+      id = taskId,
+      title = cleanTitle,
+      description = description.trim(),
+      requiresApproval = requiresApproval,
+      recurrenceType = recurrenceType.code,
+      targetDaysOfWeek = targetDaysOfWeek.joinToString(","),
+      startDate = startDate,
+      isArchived = false,
+      createdAtMillis = System.currentTimeMillis()
+    )
+    heroDao.insertTask(task)
+
+    val assignments = assignedChildIds.distinct().map { childId ->
+      TaskAssignmentEntity(
+        id = java.util.UUID.randomUUID().toString(),
+        taskId = taskId,
+        childId = childId,
+        createdAtMillis = System.currentTimeMillis()
+      )
+    }
+    if (assignments.isNotEmpty()) {
+      heroDao.insertAssignments(assignments)
+    }
+    return taskId
+  }
+
+  suspend fun updateParentTask(
+    taskId: String,
+    title: String,
+    description: String,
+    requiresApproval: Boolean,
+    recurrenceType: RecurrenceType,
+    targetDaysOfWeek: List<Int>,
+    assignedChildIds: List<String>
+  ) {
+    val cleanTitle = title.trim()
+    require(cleanTitle.isNotEmpty()) { "عنوان المهمة مطلوب" }
+    heroDao.updateTask(
+      taskId = taskId,
+      title = cleanTitle,
+      description = description.trim(),
+      requiresApproval = requiresApproval,
+      recurrenceType = recurrenceType.code,
+      targetDaysOfWeek = targetDaysOfWeek.joinToString(",")
+    )
+    // Update assignments
+    heroDao.deleteAssignmentsForTask(taskId)
+    val assignments = assignedChildIds.distinct().map { childId ->
+      TaskAssignmentEntity(
+        id = java.util.UUID.randomUUID().toString(),
+        taskId = taskId,
+        childId = childId,
+        createdAtMillis = System.currentTimeMillis()
+      )
+    }
+    if (assignments.isNotEmpty()) {
+      heroDao.insertAssignments(assignments)
+    }
+  }
+
+  suspend fun archiveParentTask(taskId: String) {
+    heroDao.archiveTask(taskId)
+  }
+
+  suspend fun getAssignedChildIdsForTask(taskId: String): List<String> {
+    return heroDao.getAssignmentsForTask(taskId).map { it.childId }
+  }
+
+  // ==========================================
+  // --- Occurrences Generation & Lifecycle ---
+  // ==========================================
+
+  fun getOccurrencesForChild(childId: String, dateStr: String = getTodayDateString()): Flow<List<TaskOccurrenceEntity>> {
+    return heroDao.getOccurrencesForChildAndDate(childId, dateStr)
+  }
+
+  /**
+   * Synchronizes active parent tasks assigned to [childId] into [task_occurrences] for [dateStr].
+   * Guarantees that duplicate occurrences are NEVER created for the same (taskId, childId, dateStr).
+   */
+  suspend fun syncOccurrencesForChildAndDate(childId: String, dateStr: String = getTodayDateString()) {
+    val childAssignments = heroDao.getAssignmentsForChild(childId)
+    if (childAssignments.isEmpty()) return
+
+    val calendar = Calendar.getInstance()
+    // 1=Sunday, 2=Monday, ..., 7=Saturday
+    val currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+
+    for (assignment in childAssignments) {
+      val task = heroDao.getTaskById(assignment.taskId) ?: continue
+      if (task.isArchived) continue
+
+      // Check date start
+      if (task.startDate > dateStr) continue
+
+      // Check recurrence applicability
+      val isApplicableToday = when (task.recurrenceType) {
+        RecurrenceType.ONCE.code -> (task.startDate == dateStr)
+        RecurrenceType.DAILY.code -> true
+        RecurrenceType.CUSTOM_DAYS.code -> {
+          val days = task.targetDaysOfWeek.split(",").mapNotNull { it.trim().toIntOrNull() }
+          days.contains(currentDayOfWeek)
+        }
+        else -> true
+      }
+
+      if (isApplicableToday) {
+        val existing = heroDao.getOccurrence(task.id, childId, dateStr)
+        if (existing == null) {
+          val occurrence = TaskOccurrenceEntity(
+            id = java.util.UUID.randomUUID().toString(),
+            taskId = task.id,
+            childId = childId,
+            dateStr = dateStr,
+            status = TaskOccurrenceStatus.NOT_STARTED.code,
+            snapshotTitle = task.title,
+            snapshotDescription = task.description,
+            requiresApprovalSnapshot = task.requiresApproval,
+            completedAtMillis = null,
+            parentFeedbackNote = null,
+            updatedAtMillis = System.currentTimeMillis()
+          )
+          heroDao.insertOccurrenceIfNotExists(occurrence)
+        }
+      }
+    }
+  }
+
+  suspend fun submitChildTaskCompletion(occurrenceId: String, requiresApprovalSnapshot: Boolean) {
+    val newStatus = if (requiresApprovalSnapshot) {
+      TaskOccurrenceStatus.PENDING_APPROVAL.code
+    } else {
+      TaskOccurrenceStatus.COMPLETED.code
+    }
+    val now = System.currentTimeMillis()
+    heroDao.updateOccurrenceStatus(occurrenceId, newStatus, completedAtMillis = now, updatedAtMillis = now)
+  }
+
+  suspend fun cancelChildTaskPendingApproval(occurrenceId: String) {
+    val now = System.currentTimeMillis()
+    heroDao.updateOccurrenceStatus(occurrenceId, TaskOccurrenceStatus.NOT_STARTED.code, completedAtMillis = null, updatedAtMillis = now)
+  }
+
+  suspend fun skipTaskToday(occurrenceId: String) {
+    val now = System.currentTimeMillis()
+    heroDao.updateOccurrenceStatus(occurrenceId, TaskOccurrenceStatus.SKIPPED.code, completedAtMillis = null, updatedAtMillis = now)
+  }
+
+  suspend fun approveTaskOccurrence(occurrenceId: String) {
+    val now = System.currentTimeMillis()
+    heroDao.reviewOccurrence(occurrenceId, TaskOccurrenceStatus.COMPLETED.code, note = null, updatedAtMillis = now)
+  }
+
+  suspend fun retryTaskOccurrence(occurrenceId: String, gentleNote: String?) {
+    val now = System.currentTimeMillis()
+    heroDao.reviewOccurrence(occurrenceId, TaskOccurrenceStatus.NOT_STARTED.code, note = gentleNote?.trim(), updatedAtMillis = now)
+  }
+
+  // ==========================================
+  // --- Educational Effort Praise ---
+  // ==========================================
+
+  private val effortPraiseMessages = listOf(
+    "رتّبت حاجتك بنفسك، شكرًا على اهتمامك ومسؤوليتك!",
+    "محاولة رائعة واهتمام جميل، شكرًا لمجهودك الطيب اليوم!",
+    "خطوة ممتازة نحو الاعتماد على نفسك، فخورون بجهدك!",
+    "شكرًا لمبادرتك الطيبة، كل خطوة إيجابية تصنع فرقاً جميلاً!",
+    "أنجزت خطوتك اليوم بهدوء وإتقان، بارك الله في سعيك!"
+  )
+
+  fun getRandomEffortPraise(): String = effortPraiseMessages.random()
+
+  // ==========================================
+  // --- Parent Security & PIN Gate ---
+  // ==========================================
+
+  val parentSecurityFlow: Flow<ParentSecurityEntity?> = heroDao.getParentSecurityFlow()
+
+  sealed class PinCheckResult {
+    object Success : PinCheckResult()
+    data class IncorrectPin(val failedAttempts: Int, val lockoutSecondsRemaining: Long) : PinCheckResult()
+    data class LockedOut(val secondsRemaining: Long) : PinCheckResult()
+    object NotConfigured : PinCheckResult()
+  }
+
+  suspend fun isPinConfigured(): Boolean {
+    val sec = heroDao.getParentSecurity()
+    return sec != null && sec.isConfigured
+  }
+
+  suspend fun setupInitialPin(pin: String): Boolean {
+    if (pin.length != 6 || !pin.all { it.isDigit() }) return false
+    val salt = SecurityUtils.generateSalt()
+    val hash = SecurityUtils.hashPin(pin, salt)
+    val entity = ParentSecurityEntity(
+      id = 1,
+      pinSalt = salt,
+      pinHash = hash,
+      failedAttempts = 0,
+      lockoutUntilMillis = 0L,
+      isConfigured = true,
+      updatedAtMillis = System.currentTimeMillis()
+    )
+    heroDao.insertOrUpdateParentSecurity(entity)
+    return true
+  }
+
+  suspend fun verifyPin(enteredPin: String): PinCheckResult {
+    val sec = heroDao.getParentSecurity() ?: return PinCheckResult.NotConfigured
+    if (!sec.isConfigured) return PinCheckResult.NotConfigured
+
+    val now = System.currentTimeMillis()
+    if (sec.lockoutUntilMillis > now) {
+      val remainingSeconds = (sec.lockoutUntilMillis - now + 999) / 1000
+      return PinCheckResult.LockedOut(remainingSeconds)
+    }
+
+    val isValid = SecurityUtils.verifyPin(enteredPin, sec.pinSalt, sec.pinHash)
+    if (isValid) {
+      // Reset failed attempts on success
+      heroDao.insertOrUpdateParentSecurity(
+        sec.copy(failedAttempts = 0, lockoutUntilMillis = 0L, updatedAtMillis = now)
+      )
+      return PinCheckResult.Success
+    } else {
+      val newFailedAttempts = sec.failedAttempts + 1
+      val lockoutDuration = SecurityUtils.getLockoutDurationMillis(newFailedAttempts)
+      val newLockoutUntil = if (lockoutDuration > 0) now + lockoutDuration else 0L
+      heroDao.insertOrUpdateParentSecurity(
+        sec.copy(
+          failedAttempts = newFailedAttempts,
+          lockoutUntilMillis = newLockoutUntil,
+          updatedAtMillis = now
+        )
+      )
+      val lockoutSec = if (lockoutDuration > 0) lockoutDuration / 1000 else 0L
+      return PinCheckResult.IncorrectPin(newFailedAttempts, lockoutSec)
+    }
+  }
+
+  suspend fun changePin(currentPin: String, newPin: String): Boolean {
+    val verify = verifyPin(currentPin)
+    if (verify !is PinCheckResult.Success) return false
+    return setupInitialPin(newPin)
+  }
+
+  suspend fun resetPinWithDeviceAuth(newPin: String): Boolean {
+    return setupInitialPin(newPin)
+  }
 }
+

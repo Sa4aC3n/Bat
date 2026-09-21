@@ -3,18 +3,28 @@ package com.batal.elyoum.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.batal.elyoum.data.AgeGroup
+import com.batal.elyoum.data.ChildProfileEntity
 import com.batal.elyoum.data.DailyDeed
 import com.batal.elyoum.data.Hero
 import com.batal.elyoum.data.HeroCategory
 import com.batal.elyoum.data.HeroRepository
 import com.batal.elyoum.data.HonoredHeroEntity
+import com.batal.elyoum.data.ParentSecurityEntity
+import com.batal.elyoum.data.ParentTaskEntity
+import com.batal.elyoum.data.RecurrenceType
+import com.batal.elyoum.data.TaskOccurrenceEntity
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
 
 data class DeedWithStatus(
   val deed: DailyDeed,
@@ -210,5 +220,271 @@ class HeroViewModel(application: Application) : AndroidViewModel(application) {
     _currentQuizIndex.value = 0
     _quizAnswers.value = emptyMap()
     _quizResult.value = null
+  }
+
+  // ==========================================
+  // --- Child Profiles & Preferences ---
+  // ==========================================
+
+  val activeChildren: StateFlow<List<ChildProfileEntity>> = repository.activeChildren.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  val allChildren: StateFlow<List<ChildProfileEntity>> = repository.allChildren.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  private val _selectedChildId = MutableStateFlow<String?>(repository.getSavedSelectedChildId())
+  val selectedChildId: StateFlow<String?> = _selectedChildId.asStateFlow()
+
+  val selectedChild: StateFlow<ChildProfileEntity?> = combine(activeChildren, _selectedChildId) { list, id ->
+    if (id != null) {
+      list.find { it.id == id } ?: list.firstOrNull()
+    } else {
+      list.firstOrNull()
+    }
+  }.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = null
+  )
+
+  init {
+    viewModelScope.launch {
+      selectedChild.collect { child ->
+        if (child != null) {
+          repository.syncOccurrencesForChildAndDate(child.id, repository.getTodayDateString())
+        }
+      }
+    }
+  }
+
+  fun selectChild(childId: String) {
+    _selectedChildId.value = childId
+    repository.saveSelectedChildId(childId)
+    syncTodayTasksForChild(childId)
+  }
+
+  fun createChild(alias: String, ageGroup: AgeGroup, avatarId: String, onComplete: () -> Unit = {}) {
+    viewModelScope.launch {
+      val newId = repository.createChildProfile(alias, ageGroup, avatarId)
+      _selectedChildId.value = newId
+      syncTodayTasksForChild(newId)
+      onComplete()
+    }
+  }
+
+  fun updateChild(id: String, alias: String, ageGroup: AgeGroup, avatarId: String, onComplete: () -> Unit = {}) {
+    viewModelScope.launch {
+      repository.updateChildProfile(id, alias, ageGroup, avatarId)
+      onComplete()
+    }
+  }
+
+  fun archiveChild(id: String, onComplete: () -> Unit = {}) {
+    viewModelScope.launch {
+      repository.archiveChildProfile(id)
+      onComplete()
+    }
+  }
+
+  // ==========================================
+  // --- Parent Tasks & Occurrences ---
+  // ==========================================
+
+  val activeTasks: StateFlow<List<ParentTaskEntity>> = repository.activeTasks.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  val allTasks: StateFlow<List<ParentTaskEntity>> = repository.allTasks.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  val pendingApprovalOccurrences: StateFlow<List<TaskOccurrenceEntity>> = repository.pendingApprovalOccurrences.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  @OptIn(ExperimentalCoroutinesApi::class)
+  val todayChildOccurrences: StateFlow<List<TaskOccurrenceEntity>> = selectedChild.flatMapLatest { child ->
+    if (child == null) {
+      flowOf(emptyList())
+    } else {
+      repository.getOccurrencesForChild(child.id, repository.getTodayDateString())
+    }
+  }.stateIn(
+    scope = viewModelScope,
+    started = SharingStarted.WhileSubscribed(5000),
+    initialValue = emptyList()
+  )
+
+  fun syncTodayTasksForChild(childId: String? = selectedChild.value?.id) {
+    if (childId == null) return
+    viewModelScope.launch {
+      repository.syncOccurrencesForChildAndDate(childId, repository.getTodayDateString())
+    }
+  }
+
+  // Praise message state
+  private val _latestPraiseMessage = MutableStateFlow<String?>(null)
+  val latestPraiseMessage: StateFlow<String?> = _latestPraiseMessage.asStateFlow()
+
+  fun dismissPraiseMessage() {
+    _latestPraiseMessage.value = null
+  }
+
+  fun submitTaskCompletion(occurrence: TaskOccurrenceEntity) {
+    viewModelScope.launch {
+      repository.submitChildTaskCompletion(occurrence.id, occurrence.requiresApprovalSnapshot)
+      if (!occurrence.requiresApprovalSnapshot) {
+        _latestPraiseMessage.value = repository.getRandomEffortPraise()
+      }
+    }
+  }
+
+  fun cancelTaskPendingApproval(occurrenceId: String) {
+    viewModelScope.launch {
+      repository.cancelChildTaskPendingApproval(occurrenceId)
+    }
+  }
+
+  fun skipTaskToday(occurrenceId: String) {
+    viewModelScope.launch {
+      repository.skipTaskToday(occurrenceId)
+    }
+  }
+
+  fun approveTaskOccurrence(occurrenceId: String) {
+    viewModelScope.launch {
+      repository.approveTaskOccurrence(occurrenceId)
+      _latestPraiseMessage.value = repository.getRandomEffortPraise()
+    }
+  }
+
+  fun retryTaskOccurrence(occurrenceId: String, gentleNote: String?) {
+    viewModelScope.launch {
+      repository.retryTaskOccurrence(occurrenceId, gentleNote)
+    }
+  }
+
+  fun createParentTask(
+    title: String,
+    description: String,
+    requiresApproval: Boolean,
+    recurrenceType: RecurrenceType,
+    targetDaysOfWeek: List<Int>,
+    assignedChildIds: List<String>,
+    onComplete: () -> Unit = {}
+  ) {
+    viewModelScope.launch {
+      repository.createParentTask(
+        title = title,
+        description = description,
+        requiresApproval = requiresApproval,
+        recurrenceType = recurrenceType,
+        targetDaysOfWeek = targetDaysOfWeek,
+        assignedChildIds = assignedChildIds
+      )
+      selectedChild.value?.let { child ->
+        if (assignedChildIds.contains(child.id)) {
+          repository.syncOccurrencesForChildAndDate(child.id, repository.getTodayDateString())
+        }
+      }
+      onComplete()
+    }
+  }
+
+  fun updateParentTask(
+    taskId: String,
+    title: String,
+    description: String,
+    requiresApproval: Boolean,
+    recurrenceType: RecurrenceType,
+    targetDaysOfWeek: List<Int>,
+    assignedChildIds: List<String>,
+    onComplete: () -> Unit = {}
+  ) {
+    viewModelScope.launch {
+      repository.updateParentTask(
+        taskId = taskId,
+        title = title,
+        description = description,
+        requiresApproval = requiresApproval,
+        recurrenceType = recurrenceType,
+        targetDaysOfWeek = targetDaysOfWeek,
+        assignedChildIds = assignedChildIds
+      )
+      selectedChild.value?.let { child ->
+        repository.syncOccurrencesForChildAndDate(child.id, repository.getTodayDateString())
+      }
+      onComplete()
+    }
+  }
+
+  fun archiveParentTask(taskId: String, onComplete: () -> Unit = {}) {
+    viewModelScope.launch {
+      repository.archiveParentTask(taskId)
+      onComplete()
+    }
+  }
+
+  suspend fun getAssignedChildIds(taskId: String): List<String> {
+    return repository.getAssignedChildIdsForTask(taskId)
+  }
+
+  // ==========================================
+  // --- Parent Gate & Security Session ---
+  // ==========================================
+
+  private val _isParentSessionUnlocked = MutableStateFlow(false)
+  val isParentSessionUnlocked: StateFlow<Boolean> = _isParentSessionUnlocked.asStateFlow()
+
+  fun unlockParentSession() {
+    _isParentSessionUnlocked.value = true
+  }
+
+  fun lockParentSession() {
+    _isParentSessionUnlocked.value = false
+  }
+
+  suspend fun isPinConfigured(): Boolean {
+    return repository.isPinConfigured()
+  }
+
+  suspend fun setupInitialPin(pin: String): Boolean {
+    val success = repository.setupInitialPin(pin)
+    if (success) {
+      _isParentSessionUnlocked.value = true
+    }
+    return success
+  }
+
+  suspend fun verifyPin(enteredPin: String): HeroRepository.PinCheckResult {
+    val result = repository.verifyPin(enteredPin)
+    if (result is HeroRepository.PinCheckResult.Success) {
+      _isParentSessionUnlocked.value = true
+    }
+    return result
+  }
+
+  suspend fun changePin(currentPin: String, newPin: String): Boolean {
+    return repository.changePin(currentPin, newPin)
+  }
+
+  suspend fun resetPinWithDeviceAuth(newPin: String): Boolean {
+    val success = repository.resetPinWithDeviceAuth(newPin)
+    if (success) {
+      _isParentSessionUnlocked.value = true
+    }
+    return success
   }
 }
