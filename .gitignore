@@ -16,3 +16,10 @@
 local.properties
 .env
 debug.keystore
+*.keystore
+*.jks
+*.db
+*.db-shm
+*.db-wal
+node_modules/
+dist/
